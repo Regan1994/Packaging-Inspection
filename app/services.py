@@ -1,0 +1,909 @@
+import hashlib
+import json
+import re
+import shutil
+import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from .db import get_db, utc_now
+
+
+ALLOWED_SEMANTICS = {"unknown", "asset", "serial"}
+CODE_RE = re.compile(r"^[^\s|]+$")
+STATUS_LABELS = {
+    "created": "未完成",
+    "started": "未完成",
+    "finished": "已完成",
+    "cancelled": "已取消",
+}
+MODEL_SERIAL_PREFIXES = {"HR255": "E", "RC255": "ER", "AR210": "C", "AR170": "B", "RC210": "CR"}
+ASSEMBLY_STAGES = ("旋", "傾", "尾", "組")
+ASSEMBLY_STAGE_CODES = {"旋": "R", "傾": "T", "尾": "B", "組": "A"}
+ASSEMBLY_STAGE_BY_CODE = {code: stage for stage, code in ASSEMBLY_STAGE_CODES.items()}
+ASSEMBLY_STAGE_LABELS = {"旋": "旋轉軸", "傾": "傾斜軸", "尾": "尾座", "組": "組合"}
+DEBUG_CLEAR_CHOICES = {
+    "production": "報工批次與條碼",
+    "scans": "掃描紀錄",
+    "workers": "組裝人員",
+    "models": "機型與舊機台",
+}
+TAIPEI_TZ = timezone(timedelta(hours=8), name="Asia/Taipei")
+
+
+def infer_serial_prefix(model_name, model_code):
+    for value in (model_code, model_name):
+        key = "".join(char for char in (value or "").upper() if char.isalnum())
+        if key in MODEL_SERIAL_PREFIXES:
+            return MODEL_SERIAL_PREFIXES[key]
+    return ""
+
+
+def is_five_axis_model(model):
+    return (model["model_name"] or "").strip().upper().startswith("F")
+
+
+def validate_assembly_stage(model, assembly_stage):
+    assembly_stage = (assembly_stage or "").strip()
+    if is_five_axis_model(model):
+        if assembly_stage not in ASSEMBLY_STAGES:
+            raise ValueError("五軸機型必須選擇組裝階段：旋轉軸、傾斜軸、尾座或組合")
+        return assembly_stage
+    if assembly_stage:
+        raise ValueError("標準四軸機型不可選擇組裝階段")
+    return None
+
+
+def new_id():
+    return str(uuid.uuid4())
+
+
+def status_label(status):
+    return STATUS_LABELS.get(status, status or "-")
+
+
+def assembly_stage_label(stage):
+    """Return a clear report label for a five-axis assembly stage."""
+    return ASSEMBLY_STAGE_LABELS.get((stage or "").strip(), "—")
+
+
+def format_duration(started_at, finished_at, status=None):
+    if not started_at:
+        return "-"
+    if not finished_at:
+        return "進行中" if status == "started" else "-"
+    try:
+        started = datetime.fromisoformat(started_at)
+        finished = datetime.fromisoformat(finished_at)
+    except (TypeError, ValueError):
+        return "-"
+    seconds = max(0, int((finished - started).total_seconds()))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{days}日 {duration}" if days else duration
+
+
+def format_datetime(value):
+    """Format stored UTC timestamps for the Taiwan-based user interface."""
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def validate_text(value, field, required=True):
+    value = (value or "").strip()
+    if required and not value:
+        raise ValueError(f"{field}不可為空")
+    if "|" in value:
+        raise ValueError(f"{field}不可包含 |")
+    return value
+
+
+def validate_code(value, field):
+    value = validate_text(value, field)
+    if not CODE_RE.match(value):
+        raise ValueError(f"{field}格式不正確")
+    return value
+
+
+def add_audit(action, entity_type, entity_id=None, details=None, operator_name=None):
+    db = get_db()
+    db.execute(
+        "INSERT INTO audit_log(log_id, action, entity_type, entity_id, details, operator_name, created_at) VALUES (?,?,?,?,?,?,?)",
+        (new_id(), action, entity_type, entity_id, json.dumps(details or {}, ensure_ascii=False), operator_name, utc_now()),
+    )
+
+
+def get_setting(key, default=None):
+    row = get_db().execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value, operator_name="system"):
+    if key == "number_semantics" and value not in ALLOWED_SEMANTICS:
+        raise ValueError("number_semantics 必須是 unknown、asset 或 serial")
+    db = get_db()
+    db.execute(
+        "INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value, utc_now()),
+    )
+    add_audit("update_setting", "app_setting", key, {"value": value}, operator_name)
+    db.commit()
+
+
+def verify_access_password(password):
+    password_hash = get_setting("access_password_hash")
+    return bool(password_hash and password and check_password_hash(password_hash, password))
+
+
+def access_password_enabled():
+    return get_setting("access_password_enabled", "1") == "1"
+
+
+def set_access_password_enabled(enabled, operator_name="admin"):
+    set_setting("access_password_enabled", "1" if enabled else "0", operator_name)
+
+
+def change_access_password(current_password, new_password, operator_name="admin"):
+    if not verify_access_password(current_password):
+        raise ValueError("目前密碼不正確")
+    if not new_password or len(new_password) < 3:
+        raise ValueError("新密碼至少需要 3 個字元")
+    db = get_db()
+    db.execute(
+        "INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        ("access_password_hash", generate_password_hash(new_password), utc_now()),
+    )
+    add_audit("change_password", "app_setting", "access_password_hash", {"changed": True}, operator_name)
+    db.commit()
+
+
+def list_models(active_only=False):
+    sql = "SELECT * FROM model_master"
+    if active_only:
+        sql += " WHERE is_active=1"
+    return get_db().execute(sql + " ORDER BY sort_order, model_name").fetchall()
+
+
+def list_assembly_workers(active_only=False):
+    sql = "SELECT * FROM assembly_worker"
+    if active_only:
+        sql += " WHERE is_active=1"
+    return get_db().execute(sql + " ORDER BY name COLLATE NOCASE").fetchall()
+
+
+def list_report_operators():
+    rows = get_db().execute("""
+        SELECT name AS operator_name FROM assembly_worker WHERE trim(name) <> ''
+        UNION
+        SELECT operator_name FROM job_run WHERE trim(operator_name) <> ''
+        ORDER BY operator_name COLLATE NOCASE
+    """).fetchall()
+    return [row["operator_name"] for row in rows]
+
+
+def get_assembly_worker(name):
+    name = validate_text(name, "組裝人員")
+    return get_db().execute(
+        "SELECT * FROM assembly_worker WHERE name=? COLLATE NOCASE AND is_active=1",
+        (name,),
+    ).fetchone()
+
+
+def create_assembly_worker(name, changed_by="admin"):
+    name = validate_text(name, "組裝人員")
+    db = get_db()
+    now = utc_now()
+    try:
+        cur = db.execute(
+            "INSERT INTO assembly_worker(name,created_at,updated_at) VALUES(?,?,?)",
+            (name, now, now),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("此組裝人員已存在") from exc
+    add_audit("create", "assembly_worker", str(cur.lastrowid), {"name": name}, changed_by)
+    db.commit()
+    return cur.lastrowid
+
+
+def set_assembly_worker_active(worker_id, is_active, changed_by="admin"):
+    db = get_db()
+    worker = db.execute("SELECT name FROM assembly_worker WHERE id=?", (worker_id,)).fetchone()
+    if not worker:
+        raise ValueError("找不到組裝人員")
+    db.execute(
+        "UPDATE assembly_worker SET is_active=?,updated_at=? WHERE id=?",
+        (int(bool(is_active)), utc_now(), worker_id),
+    )
+    add_audit("update", "assembly_worker", str(worker_id), {"name": worker["name"], "is_active": bool(is_active)}, changed_by)
+    db.commit()
+
+
+def create_model(model_name, model_code=None, description="", operator_name="system", serial_prefix=None):
+    model_name = validate_text(model_name, "機型名稱")
+    if get_db().execute("SELECT 1 FROM model_master WHERE model_name=? COLLATE NOCASE", (model_name,)).fetchone():
+        raise ValueError("機型名稱已存在")
+    model_code = validate_code(model_name, "機型名稱") if model_code is None else validate_code(model_code, "機型代碼")
+    serial_prefix = validate_code(serial_prefix, "製號字首") if serial_prefix else infer_serial_prefix(model_name, model_code)
+    db = get_db()
+    now = utc_now()
+    try:
+        cur = db.execute(
+            "INSERT INTO model_master(model_name,model_code,serial_prefix,description,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (model_name, model_code, serial_prefix, description.strip(), now, now),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("機型代碼已存在") from exc
+    add_audit("create", "model_master", str(cur.lastrowid), {"model_code": model_code}, operator_name)
+    db.commit()
+    return cur.lastrowid
+
+
+def update_model(model_id, model_name, model_code=None, description="", is_active=True, operator_name="system", serial_prefix=None):
+    model_name = validate_text(model_name, "機型名稱")
+    db = get_db()
+    current = db.execute("SELECT model_code FROM model_master WHERE id=?", (model_id,)).fetchone()
+    if not current:
+        raise ValueError("找不到機型")
+    if db.execute("SELECT 1 FROM model_master WHERE model_name=? COLLATE NOCASE AND id<>?", (model_name, model_id)).fetchone():
+        raise ValueError("機型名稱已存在")
+    model_code = validate_code(current["model_code"] if model_code is None else model_code, "機型代碼")
+    serial_prefix = validate_code(serial_prefix, "製號字首") if serial_prefix else infer_serial_prefix(model_name, model_code)
+    try:
+        db.execute("UPDATE model_master SET model_name=?,model_code=?,serial_prefix=?,description=?,is_active=?,updated_at=? WHERE id=?", (model_name, model_code, serial_prefix, description.strip(), int(bool(is_active)), utc_now(), model_id))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("機型代碼已存在") from exc
+    add_audit("update", "model_master", str(model_id), {"model_code": model_code, "is_active": bool(is_active)}, operator_name)
+    db.commit()
+
+
+def delete_model(model_id, expected_name, backup_dir, operator_name="admin"):
+    db = get_db()
+
+    def check_deletable():
+        model = db.execute("SELECT model_name FROM model_master WHERE id=?", (model_id,)).fetchone()
+        if not model:
+            raise ValueError("找不到機型，可能已經刪除")
+        if model["model_name"] != expected_name:
+            raise ValueError("機型名稱已變更，請重新整理後再刪除")
+        if db.execute("SELECT 1 FROM job_run WHERE model_id=? LIMIT 1", (model_id,)).fetchone():
+            raise ValueError("此機型已有報工紀錄，不能刪除；請改用停用")
+        if db.execute("SELECT 1 FROM machine_master WHERE model_id=? LIMIT 1", (model_id,)).fetchone():
+            raise ValueError("此機型仍有舊機台資料，不能刪除；請改用停用")
+        return model
+
+    check_deletable()
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        model = check_deletable()
+        db.execute("DELETE FROM model_master WHERE id=?", (model_id,))
+        add_audit("delete", "model_master", str(model_id), {"model_name": model["model_name"], "backup": str(backup)}, operator_name)
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ValueError("此機型仍有關聯資料，不能刪除；請改用停用") from exc
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
+def list_machines(model_id=None, active_only=False):
+    clauses, params = [], []
+    if model_id:
+        clauses.append("model_id=?")
+        params.append(model_id)
+    if active_only:
+        clauses.append("is_active=1")
+    sql = "SELECT * FROM machine_master"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    return get_db().execute(sql + " ORDER BY sort_order, number_value, display_no", params).fetchall()
+
+
+def machine_number_prefix(model_id):
+    machines = get_db().execute(
+        "SELECT display_no FROM machine_master WHERE model_id=? AND is_active=1 ORDER BY id",
+        (model_id,),
+    ).fetchall()
+    prefixes = set()
+    for machine in machines:
+        prefix, separator, suffix = machine["display_no"].rpartition("-")
+        if not separator or not prefix or not suffix.isdigit():
+            return ""
+        prefixes.add(prefix + separator)
+    return next(iter(prefixes)) if len(prefixes) == 1 else ""
+
+
+def machine_ids_from_numbers(model_id, machine_numbers):
+    tokens = [token.strip() for token in (machine_numbers or "").split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise ValueError("請以逗號分隔輸入機台編號")
+    normalized = [token.casefold() for token in tokens]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("機台編號不可重複")
+
+    available = get_db().execute(
+        "SELECT id, display_no FROM machine_master WHERE model_id=? AND is_active=1",
+        (model_id,),
+    ).fetchall()
+    machines_by_number = {row["display_no"].casefold(): row["id"] for row in available}
+    prefix = machine_number_prefix(model_id)
+    machine_numbers = [prefix + token if prefix and token.isdigit() else token for token in tokens]
+    invalid = [number for number, token in zip(machine_numbers, tokens) if number.casefold() not in machines_by_number or (prefix and not token.isdigit())]
+    if invalid:
+        raise ValueError("機台不存在、未啟用或不屬於所選機型：" + ", ".join(invalid))
+    return [machines_by_number[number.casefold()] for number in machine_numbers]
+
+
+def _machine_semantics(value):
+    value = value or get_setting("number_semantics", "unknown")
+    if value not in ALLOWED_SEMANTICS:
+        raise ValueError("編號語意必須是 unknown、asset 或 serial")
+    return value
+
+
+def create_machine(model_id, display_no, number_prefix="", number_value=None, number_width=None, semantics=None, operator_name="system"):
+    display_no = validate_code(display_no, "機台編號")
+    semantics = _machine_semantics(semantics)
+    db = get_db()
+    now = utc_now()
+    try:
+        cur = db.execute(
+            "INSERT INTO machine_master(model_id,display_no,number_prefix,number_value,number_width,number_semantics,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (model_id, display_no, number_prefix.strip(), number_value, number_width, semantics, now, now),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("同一機型的機台編號不可重複") from exc
+    add_audit("create", "machine_master", str(cur.lastrowid), {"display_no": display_no, "number_semantics": semantics}, operator_name)
+    db.commit()
+    return cur.lastrowid
+
+
+def create_machine_range(model_id, prefix, start, end, width, semantics="unknown", operator_name="system"):
+    prefix = validate_code(prefix, "機台前綴")
+    semantics = _machine_semantics(semantics)
+    if start < 0 or end < start or width < 1:
+        raise ValueError("機台範圍或固定寬度不正確")
+    db = get_db()
+    now = utc_now()
+    ids = []
+    try:
+        for value in range(start, end + 1):
+            display_no = f"{prefix}-{value:0{width}d}"
+            cur = db.execute("INSERT INTO machine_master(model_id,display_no,number_prefix,number_value,number_width,number_semantics,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (model_id, display_no, prefix, value, width, semantics, now, now))
+            ids.append(cur.lastrowid)
+            add_audit("create", "machine_master", str(cur.lastrowid), {"display_no": display_no, "number_semantics": semantics}, operator_name)
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ValueError("同一機型的機台編號不可重複") from exc
+    return ids
+
+
+def update_machine(machine_id, display_no, semantics, is_active, operator_name="system"):
+    display_no = validate_code(display_no, "機台編號")
+    semantics = _machine_semantics(semantics)
+    db = get_db()
+    try:
+        db.execute("UPDATE machine_master SET display_no=?,number_semantics=?,is_active=?,updated_at=? WHERE id=?", (display_no, semantics, int(bool(is_active)), utc_now(), machine_id))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("同一機型的機台編號不可重複") from exc
+    add_audit("update", "machine_master", str(machine_id), {"display_no": display_no, "number_semantics": semantics, "is_active": bool(is_active)}, operator_name)
+    db.commit()
+
+
+def get_batch(batch_id):
+    return get_db().execute("SELECT * FROM production_batch WHERE batch_id=?", (batch_id,)).fetchone()
+
+
+def list_recent_batches(limit=20):
+    """Return recent batches with details needed for reprinting."""
+    limit = max(1, min(int(limit), 100))
+    db = get_db()
+    batches = db.execute("SELECT * FROM production_batch ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    recent = []
+    for batch in batches:
+        jobs = db.execute(
+            "SELECT product_serial,machine_no_snapshot,model_name_snapshot FROM job_run WHERE batch_id=? ORDER BY id",
+            (batch["batch_id"],),
+        ).fetchall()
+        serials = [job["product_serial"] or job["machine_no_snapshot"] for job in jobs if job["product_serial"] or job["machine_no_snapshot"]]
+        model_names = [job["model_name_snapshot"] for job in jobs if job["model_name_snapshot"]]
+        if len(serials) > 1:
+            serial_range = f"{serials[0]}~{serials[-1]}"
+        else:
+            serial_range = serials[0] if serials else "-"
+        recent.append(
+            {
+                "batch_id": batch["batch_id"],
+                "created_at": batch["created_at"],
+                "model_name": model_names[0] if model_names else "-",
+                "assembly_stage": batch["assembly_stage"],
+                "serial_range": serial_range,
+                "product_count": len(jobs),
+                "operator_name": batch["operator_name"],
+            }
+        )
+    return recent
+
+
+def delete_batch(batch_id, expected_batch_id, confirmation, backup_dir, operator_name="admin"):
+    batch_id = validate_text(batch_id, "批次識別碼")
+    if batch_id != validate_text(expected_batch_id, "刪除確認"):
+        raise ValueError("刪除確認與批次不一致")
+    if confirmation != "刪除":
+        raise ValueError("請輸入「刪除」確認")
+
+    db = get_db()
+    batch = get_batch(batch_id)
+    if not batch:
+        raise ValueError("找不到報工批次")
+    job_ids = [row["job_run_id"] for row in db.execute("SELECT job_run_id FROM job_run WHERE batch_id=?", (batch_id,)).fetchall()]
+    barcode_count = db.execute(
+        "SELECT COUNT(*) FROM barcode_record WHERE batch_id=? OR job_run_id IN (SELECT job_run_id FROM job_run WHERE batch_id=?)",
+        (batch_id, batch_id),
+    ).fetchone()[0]
+    scan_count = db.execute(
+        "SELECT COUNT(*) FROM scan_event WHERE payload IN (SELECT payload FROM barcode_record WHERE batch_id=? OR job_run_id IN (SELECT job_run_id FROM job_run WHERE batch_id=?)) OR job_run_id IN (SELECT job_run_id FROM job_run WHERE batch_id=?)",
+        (batch_id, batch_id, batch_id),
+    ).fetchone()[0]
+
+    # Create a verified snapshot before any DELETE statement.
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "DELETE FROM scan_event WHERE payload IN (SELECT payload FROM barcode_record WHERE batch_id=? OR job_run_id IN (SELECT job_run_id FROM job_run WHERE batch_id=?)) OR job_run_id IN (SELECT job_run_id FROM job_run WHERE batch_id=?)",
+            (batch_id, batch_id, batch_id),
+        )
+        db.execute("DELETE FROM barcode_record WHERE batch_id=? OR job_run_id IN (SELECT job_run_id FROM job_run WHERE batch_id=?)", (batch_id, batch_id))
+        db.execute("DELETE FROM job_run WHERE batch_id=?", (batch_id,))
+        db.execute("DELETE FROM production_batch WHERE batch_id=?", (batch_id,))
+        if db.execute("PRAGMA foreign_key_check").fetchall():
+            raise ValueError("資料關聯檢查失敗，刪除已取消")
+        add_audit(
+            "delete",
+            "production_batch",
+            batch_id,
+            {"job_count": len(job_ids), "barcode_count": barcode_count, "scan_count": scan_count, "backup": str(backup)},
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup, {"job_run": len(job_ids), "barcode_record": barcode_count, "scan_event": scan_count, "production_batch": 1}
+
+
+def get_job(job_run_id):
+    return get_db().execute("SELECT * FROM job_run WHERE job_run_id=?", (job_run_id,)).fetchone()
+
+
+def create_batch(model_id, manufacturing_year, starting_number, product_count, operator_name, assembly_stage=None):
+    try:
+        manufacturing_year = int(manufacturing_year)
+        starting_number = int(starting_number)
+        product_count = int(product_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("製作年份、起始流水號與台數都必須是正整數") from exc
+    if not 2000 <= manufacturing_year <= 2099 or starting_number < 1 or product_count < 1:
+        raise ValueError("製作年份需為 2000–2099，起始流水號與台數必須是正整數")
+    operator_name = validate_text(operator_name, "組裝人員")
+    db = get_db()
+    model = db.execute("SELECT * FROM model_master WHERE id=? AND is_active=1", (model_id,)).fetchone()
+    if not model:
+        raise ValueError("機型不存在或已停用")
+    assembly_stage = validate_assembly_stage(model, assembly_stage)
+    serial_prefix = model["serial_prefix"] or infer_serial_prefix(model["model_name"], model["model_code"])
+    if not serial_prefix:
+        raise ValueError("此機型尚未設定製號字首，請至機型主檔設定")
+    year_marker = f"{(manufacturing_year + 1) % 100:02d}"
+    serials = [f"{serial_prefix}{year_marker}-{number:02d}" for number in range(starting_number, starting_number + product_count)]
+    placeholders = ",".join("?" for _ in serials)
+    if assembly_stage:
+        used = db.execute(
+            f"SELECT product_serial FROM job_run WHERE product_serial IN ({placeholders}) AND assembly_stage=?",
+            [*serials, assembly_stage],
+        ).fetchall()
+    else:
+        used = db.execute(
+            f"SELECT product_serial FROM job_run WHERE product_serial IN ({placeholders}) AND assembly_stage IS NULL",
+            serials,
+        ).fetchall()
+    legacy_used = db.execute(f"SELECT machine_no_snapshot FROM job_run WHERE machine_no_snapshot IN ({placeholders})", serials).fetchall()
+    if used or legacy_used:
+        duplicates = {row[0] for row in [*used, *legacy_used]}
+        raise ValueError("以下製號已存在，請更換起始流水號：" + ", ".join(sorted(duplicates)))
+    now = utc_now()
+    batch_id = new_id()
+    batch_no = "B-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + batch_id[:6].upper()
+    db.execute("INSERT INTO production_batch(batch_id,batch_no,selection_mode,assembly_stage,operator_name,created_at) VALUES(?,?,?,?,?,?)", (batch_id, batch_no, "serial_range", assembly_stage, operator_name, now))
+    job_ids = []
+    for serial in serials:
+        job_id = new_id()
+        job_ids.append(job_id)
+        db.execute("INSERT INTO job_run(job_run_id,batch_id,model_id,machine_id,product_serial,manufacturing_year,assembly_stage,model_name_snapshot,model_code_snapshot,machine_no_snapshot,number_semantics_snapshot,planned_qty,status,operator_name,created_at,updated_at) VALUES(?,?,?,NULL,?,?,?,?,?,NULL,'unknown',NULL,'created',?,?,?)", (job_id, batch_id, model_id, serial, manufacturing_year, assembly_stage, model["model_name"], model["model_code"], operator_name, now, now))
+    add_audit("create", "production_batch", batch_id, {"job_count": len(job_ids), "manufacturing_year": manufacturing_year, "assembly_stage": assembly_stage, "serials": serials}, operator_name)
+    db.commit()
+    return batch_id, job_ids
+
+
+def checksum_for(parts):
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:8].upper()
+
+
+def compact_batch_token(batch_id):
+    return batch_id.replace("-", "").upper()[:8]
+
+
+def make_payload(kind, job):
+    parts = ["INTJR", "V1", kind, job["batch_id"], job["job_run_id"], job["model_code_snapshot"], job["machine_no_snapshot"]]
+    return "|".join(parts + [checksum_for(parts)])
+
+
+def make_batch_payload(kind, batch, jobs):
+    if batch["assembly_stage"]:
+        prefix = "I2" + ("S" if kind == "START" else "F")
+        token = compact_batch_token(batch["batch_id"])
+        stage_code = ASSEMBLY_STAGE_CODES[batch["assembly_stage"]]
+        return prefix + token + stage_code + checksum_for([prefix, token, stage_code])[:4]
+    prefix = "I1" + ("S" if kind == "START" else "F")
+    token = compact_batch_token(batch["batch_id"])
+    return prefix + token + checksum_for([prefix, token])[:4]
+
+
+def parse_payload(payload):
+    raw = (payload or "").strip()
+    if len(raw) == 16 and raw[:2] == "I2" and raw[2] in {"S", "F"}:
+        prefix, token, stage_code, check = raw[:3], raw[3:11], raw[11], raw[12:]
+        if stage_code not in ASSEMBLY_STAGE_BY_CODE or checksum_for([prefix, token, stage_code])[:4] != check:
+            raise ValueError("條碼 checksum 或組裝階段不正確")
+        return {"system": "INTJR", "version": "2", "type": "START" if raw[2] == "S" else "FINISH", "batch_token": token, "assembly_stage": ASSEMBLY_STAGE_BY_CODE[stage_code], "checksum": check, "scope": "batch"}
+    if len(raw) == 15 and raw[:2] == "I1" and raw[2] in {"S", "F"}:
+        prefix, token, check = raw[:3], raw[3:11], raw[11:]
+        if checksum_for([prefix, token])[:4] != check:
+            raise ValueError("條碼 checksum 不正確")
+        return {"system": "INTJR", "version": "1", "type": "START" if raw[2] == "S" else "FINISH", "batch_token": token, "checksum": check, "scope": "batch"}
+    parts = raw.split("|")
+    if len(parts) == 5 and parts[0] == "INTJR" and parts[1] in {"1", "V1"}:
+        if parts[2] not in {"S", "F", "START", "FINISH"} or checksum_for(parts[:-1]) != parts[-1]:
+            raise ValueError("條碼 checksum 或類型不正確")
+        return {"system": parts[0], "version": parts[1], "type": {"S": "START", "F": "FINISH"}.get(parts[2], parts[2]), "batch_token": parts[3], "checksum": parts[4], "scope": "batch"}
+    if len(parts) != 8 or parts[0] != "INTJR":
+        raise ValueError("無效條碼格式")
+    if parts[1] != "V1":
+        raise ValueError("不支援的條碼版本")
+    if parts[2] not in {"START", "FINISH"}:
+        raise ValueError("不支援的條碼類型")
+    if checksum_for(parts[:-1]) != parts[-1]:
+        raise ValueError("條碼 checksum 不正確")
+    return {"system": parts[0], "version": parts[1], "type": parts[2], "batch_id": parts[3], "job_run_id": parts[4], "model_code": parts[5], "machine_no": parts[6], "checksum": parts[7], "scope": "job_run"}
+
+
+def ensure_barcodes(batch_id):
+    db = get_db()
+    jobs = db.execute("SELECT * FROM job_run WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
+    now = utc_now()
+    batch = get_batch(batch_id)
+    if batch["selection_mode"] == "serial_range" or get_setting("batch_scan_mode", "batch") == "batch":
+        for kind in ("START", "FINISH"):
+            payload = make_batch_payload(kind, batch, jobs)
+            db.execute("INSERT OR IGNORE INTO barcode_record(batch_id,barcode_scope,barcode_type,payload,created_at) VALUES(?,?,?,?,?)", (batch_id, "batch", kind, payload, now))
+    else:
+        for job in jobs:
+            for kind in ("START", "FINISH"):
+                payload = make_payload(kind, job)
+                db.execute("INSERT OR IGNORE INTO barcode_record(job_run_id,barcode_scope,barcode_type,payload,created_at) VALUES(?,?,?,?,?)", (job["job_run_id"], "job_run", kind, payload, now))
+    db.commit()
+    return jobs
+
+
+def scan(payload, operator_name="scanner"):
+    db = get_db()
+    event_id = new_id()
+    scanned_at = utc_now()
+    try:
+        parsed = parse_payload(payload)
+        kind = parsed["type"]
+        if parsed.get("scope") == "batch":
+            candidates = db.execute("SELECT * FROM production_batch WHERE upper(replace(batch_id, '-', '')) LIKE ?", (parsed["batch_token"] + "%",)).fetchall()
+            if len(candidates) != 1:
+                raise ValueError("找不到相符的報工批次")
+            batch_id = candidates[0]["batch_id"]
+            if parsed.get("assembly_stage") and candidates[0]["assembly_stage"] != parsed["assembly_stage"]:
+                raise ValueError("條碼組裝階段與報工批次不一致")
+            jobs = db.execute("SELECT * FROM job_run WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
+            if not jobs:
+                raise ValueError("找不到相符的報工批次")
+            if kind == "START":
+                pending = [job for job in jobs if job["status"] == "created"]
+                if pending:
+                    db.executemany("UPDATE job_run SET status='started',started_at=?,updated_at=? WHERE job_run_id=?", [(scanned_at, scanned_at, job["job_run_id"]) for job in pending])
+                    result, message = "success", f"整批 START 成功：{len(pending)} 台產品"
+                elif all(job["status"] == "started" for job in jobs):
+                    result, message = "duplicate", "此批次已完成 START"
+                else:
+                    result, message = "invalid", "此批次已完成或已取消"
+            else:
+                started = [job for job in jobs if job["status"] == "started"]
+                created = [job for job in jobs if job["status"] == "created"]
+                if created:
+                    result, message = "invalid", "批次內仍有產品未 START，不能 FINISH"
+                elif started:
+                    db.executemany("UPDATE job_run SET status='finished',actual_qty=CASE WHEN product_serial IS NULL THEN planned_qty ELSE actual_qty END,finished_at=?,updated_at=? WHERE job_run_id=?", [(scanned_at, scanned_at, job["job_run_id"]) for job in started])
+                    result, message = "success", f"整批 FINISH 成功：{len(started)} 台產品"
+                elif all(job["status"] == "finished" for job in jobs):
+                    result, message = "duplicate", "此批次已完成 FINISH"
+                else:
+                    result, message = "invalid", "此批次已取消或沒有可完成的產品"
+            db.execute("INSERT INTO scan_event(event_id,payload,barcode_type,job_run_id,result,message,scanned_at,operator_name) VALUES(?,?,?,?,?,?,?,?)", (event_id, payload, kind, None, result, message, scanned_at, operator_name))
+            db.commit()
+            return {"event_id": event_id, "result": result, "message": message, "scanned_at": scanned_at}
+
+        job = get_job(parsed["job_run_id"])
+        if not job or job["batch_id"] != parsed["batch_id"] or job["model_code_snapshot"] != parsed["model_code"] or job["machine_no_snapshot"] != parsed["machine_no"]:
+            raise ValueError("找不到相符的報工資料")
+        if kind == "START":
+            if job["status"] == "created":
+                db.execute("UPDATE job_run SET status='started',started_at=?,updated_at=? WHERE job_run_id=?", (scanned_at, scanned_at, job["job_run_id"]))
+                result, message = "success", f"START 成功：{job['machine_no_snapshot']}"
+            elif job["status"] == "started":
+                result, message = "duplicate", f"已於 {format_datetime(job['started_at'])} START"
+            else:
+                result, message = "invalid", "此報工已完成或已取消"
+        else:
+            if job["status"] == "started":
+                db.execute("UPDATE job_run SET status='finished',actual_qty=CASE WHEN product_serial IS NULL THEN planned_qty ELSE actual_qty END,finished_at=?,updated_at=? WHERE job_run_id=?", (scanned_at, scanned_at, job["job_run_id"]))
+                result, message = "success", f"FINISH 成功：{job['machine_no_snapshot']}"
+            elif job["status"] == "created":
+                result, message = "invalid", "必須先掃描 START"
+            elif job["status"] == "finished":
+                result, message = "duplicate", f"已於 {format_datetime(job['finished_at'])} 完成"
+            else:
+                result, message = "invalid", "此報工已取消"
+        db.execute("INSERT INTO scan_event(event_id,payload,barcode_type,job_run_id,result,message,scanned_at,operator_name) VALUES(?,?,?,?,?,?,?,?)", (event_id, payload, kind, job["job_run_id"], result, message, scanned_at, operator_name))
+    except ValueError as exc:
+        result, message = "invalid", str(exc)
+        db.execute("INSERT INTO scan_event(event_id,payload,result,message,scanned_at,operator_name) VALUES(?,?,?,?,?,?)", (event_id, payload, result, message, scanned_at, operator_name))
+    db.commit()
+    return {"event_id": event_id, "result": result, "message": message, "scanned_at": scanned_at}
+
+
+def correct_actual_qty(job_run_id, actual_qty, operator_name):
+    try:
+        actual_qty = int(actual_qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("完成量必須是非負整數") from exc
+    if actual_qty < 0:
+        raise ValueError("完成量必須是非負整數")
+    db = get_db()
+    job = get_job(job_run_id)
+    if not job:
+        raise ValueError("找不到報工")
+    if job["status"] != "finished":
+        raise ValueError("只有已完成報工可更正完成量")
+    old_qty = job["actual_qty"]
+    db.execute("UPDATE job_run SET actual_qty=?,updated_at=? WHERE job_run_id=?", (actual_qty, utc_now(), job_run_id))
+    add_audit("correct_actual_qty", "job_run", job_run_id, {"old_actual_qty": old_qty, "new_actual_qty": actual_qty}, operator_name)
+    db.commit()
+
+
+def query_report(filters):
+    db = get_db()
+    clauses, params = [], []
+    status_group = (filters.get("status_group") or "").strip()
+    if status_group == "incomplete":
+        clauses.append("j.status IN ('created','started')")
+    elif status_group == "finished":
+        clauses.append("j.status='finished'")
+    elif status_group == "cancelled":
+        clauses.append("j.status='cancelled'")
+    mapping = {"model_name": "j.model_name_snapshot", "model_code": "j.model_code_snapshot", "machine_no": "COALESCE(j.product_serial,j.machine_no_snapshot)", "status": "j.status"}
+    for key, column in mapping.items():
+        value = (filters.get(key) or "").strip()
+        if value:
+            clauses.append(f"{column} LIKE ?")
+            params.append(f"%{value}%")
+    operator_name = (filters.get("operator_name") or "").strip()
+    if operator_name:
+        clauses.append("j.operator_name = ?")
+        params.append(operator_name)
+    for key, op in (("date_from", ">="), ("date_to", "<=")):
+        value = (filters.get(key) or "").strip()
+        if value:
+            clauses.append(f"substr(j.created_at,1,10) {op} ?")
+            params.append(value)
+    sql = "SELECT j.* FROM job_run j"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    return db.execute(sql + " ORDER BY j.created_at DESC, j.id DESC", params).fetchall()
+
+
+def summarize_report_by_operator(rows):
+    """Summarize the currently filtered report rows by assembly worker."""
+    summaries = {}
+    for row in rows:
+        operator_name = (row["operator_name"] or "").strip() or "未指定"
+        summary = summaries.setdefault(
+            operator_name,
+            {
+                "operator_name": operator_name,
+                "assembly_quantity": 0,
+                "finished": 0,
+                "started": 0,
+                "created": 0,
+                "cancelled": 0,
+            },
+        )
+        status = row["status"]
+        if status in summary:
+            summary[status] += 1
+        if status != "cancelled":
+            summary["assembly_quantity"] += 1
+
+    result = []
+    for summary in summaries.values():
+        quantity = summary["assembly_quantity"]
+        summary["completion_rate"] = round(summary["finished"] * 100 / quantity, 1) if quantity else 0.0
+        result.append(summary)
+    return sorted(result, key=lambda item: (-item["assembly_quantity"], item["operator_name"].casefold()))
+
+
+def export_xlsx(rows, path):
+    from copy import copy
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+
+    headers = ["機型", "製號", "組裝階段", "狀態", "開始時間", "結束時間", "時長", "組裝人員"]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "明細"
+    ws.append(headers)
+    def excel_value(value):
+        if not isinstance(value, str):
+            return value
+        return "'" + value if value[:1] in {"=", "+", "-", "@"} else value
+
+    for row in rows:
+        values = [row["model_name_snapshot"], row["product_serial"] or row["machine_no_snapshot"], assembly_stage_label(row["assembly_stage"]), status_label(row["status"]), format_datetime(row["started_at"]), format_datetime(row["finished_at"]), format_duration(row["started_at"], row["finished_at"], row["status"]), row["operator_name"]]
+        ws.append([excel_value(v) for v in values])
+    for cell in ws[1]:
+        header_font = copy(cell.font)
+        header_font.bold = True
+        cell.font = header_font
+    for idx, header in enumerate(headers, 1):
+        ws.column_dimensions[get_column_letter(idx)].width = min(max(len(header) + 2, 12), 24)
+
+    stats = wb.create_sheet("員工統計")
+    stats_headers = ["組裝人員", "組裝數量", "已完成", "進行中", "未開始", "已取消", "完成率"]
+    stats.append(stats_headers)
+    for summary in summarize_report_by_operator(rows):
+        stats.append(
+            [
+                excel_value(summary["operator_name"]),
+                summary["assembly_quantity"],
+                summary["finished"],
+                summary["started"],
+                summary["created"],
+                summary["cancelled"],
+                summary["completion_rate"] / 100,
+            ]
+        )
+    for cell in stats[1]:
+        header_font = copy(cell.font)
+        header_font.bold = True
+        cell.font = header_font
+    for cell in stats["G"][1:]:
+        cell.number_format = "0.0%"
+    for idx, header in enumerate(stats_headers, 1):
+        stats.column_dimensions[get_column_letter(idx)].width = min(max(len(header) + 4, 12), 24)
+
+    wb.save(path)
+
+
+def backup_database(target_dir):
+    db = get_db()
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    target = target_dir / f"intjr_backup_{timestamp}.db"
+    check = sqlite3.connect(target)
+    try:
+        db.backup(check)
+        integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        check.close()
+    if integrity != "ok" or target.stat().st_size <= 0:
+        raise ValueError("備份驗證失敗")
+    add_audit("backup", "database", str(target), {"integrity": integrity})
+    db.commit()
+    return target
+
+
+def debug_clear_counts():
+    db = get_db()
+    tables = ("production_batch", "job_run", "barcode_record", "scan_event", "assembly_worker", "model_master", "machine_master")
+    return {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
+
+
+def clear_debug_data(selected, confirmation, backup_dir, operator_name="admin"):
+    selected = set(selected)
+    if not selected or selected - DEBUG_CLEAR_CHOICES.keys():
+        raise ValueError("請選擇有效的清除項目")
+    if confirmation != "清除":
+        raise ValueError("請輸入「清除」確認")
+
+    db = get_db()
+    counts = debug_clear_counts()
+    if "production" not in selected and counts["job_run"] and selected & {"workers", "models"}:
+        raise ValueError("仍有報工資料；若要清除主檔，請同時選擇報工批次與條碼")
+
+    # A verified SQLite snapshot is created before any DELETE statement.
+    backup = backup_database(backup_dir)
+    removed = {}
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        if selected & {"production", "scans"}:
+            db.execute("DELETE FROM scan_event")
+            removed["scan_event"] = counts["scan_event"]
+        if "production" in selected:
+            for table in ("barcode_record", "job_run", "production_batch"):
+                db.execute(f"DELETE FROM {table}")
+                removed[table] = counts[table]
+        if "workers" in selected:
+            db.execute("DELETE FROM assembly_worker")
+            removed["assembly_worker"] = counts["assembly_worker"]
+        if "models" in selected:
+            for table in ("machine_master", "model_master"):
+                db.execute(f"DELETE FROM {table}")
+                removed[table] = counts[table]
+        if db.execute("PRAGMA foreign_key_check").fetchall():
+            raise ValueError("資料關聯檢查失敗，清除已取消")
+        add_audit("debug_clear", "database", details={"selected": sorted(selected), "removed": removed, "backup": str(backup)}, operator_name=operator_name)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup, removed
+
+
+def verify_sqlite_backup(path):
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("備份檔不存在或為空檔")
+    check = sqlite3.connect(path)
+    try:
+        integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        check.close()
+    if integrity != "ok":
+        raise ValueError("備份檔 integrity_check 失敗")
+    return path
+
+
+def restore_database(source_path, target_path, backup_dir, operator_name="admin"):
+    source_path = verify_sqlite_backup(source_path)
+    safety_backup = backup_database(backup_dir)
+    target_path = Path(target_path)
+    temp_target = target_path.with_suffix(target_path.suffix + ".restore.tmp")
+    shutil.copy2(source_path, temp_target)
+    verify_sqlite_backup(temp_target)
+    shutil.copy2(temp_target, target_path)
+    temp_target.unlink(missing_ok=True)
+    add_audit("restore", "database", str(target_path), {"source": str(source_path), "safety_backup": str(safety_backup)}, operator_name)
+    get_db().commit()
+    return safety_backup
+
