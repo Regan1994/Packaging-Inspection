@@ -1,4 +1,4 @@
-/* One 60 × 60 mm thermal label per batch (or legacy job). */
+/* One 60 × 60 mm thermal label per inspection order or worker. */
 .print-sheet {
   width: 60mm;
   padding: 0;
@@ -73,6 +73,19 @@
   gap: 1.5mm;
 }
 
+.worker-label .thermal-barcodes { grid-template-rows: 1fr; }
+
+.worker-label .thermal-heading {
+  min-height: 16mm;
+  padding: 2mm;
+  gap: 1mm;
+  font-size: 16pt;
+  line-height: 1.15;
+}
+
+.worker-label .thermal-model-line strong { font-size: 20pt; }
+.worker-label .thermal-count { font-size: 16pt; }
+
 .thermal-barcodes .barcode-card {
   min-height: 0;
   padding: 1mm 0;
@@ -96,6 +109,8 @@
   height: 14mm;
   min-height: 0;
 }
+
+.order-label .thermal-barcodes .barcode svg { max-width: 54mm; }
 
 @page { size: 60mm 60mm; margin: 0; }
 

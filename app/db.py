@@ -153,8 +153,121 @@ def close_db(_error=None):
         db.close()
 
 
+INSPECTION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS inspection_schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inspection_app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inspection_model_master (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    model_code TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    axis_type TEXT NOT NULL DEFAULT '4' CHECK(axis_type IN ('4','5')),
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inspection_worker (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_no TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    name TEXT NOT NULL,
+    barcode TEXT NOT NULL UNIQUE,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inspection_order (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_no TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    model_id INTEGER NOT NULL REFERENCES inspection_model_master(id),
+    model_name_snapshot TEXT NOT NULL,
+    model_code_snapshot TEXT NOT NULL,
+    axis_type_snapshot TEXT NOT NULL DEFAULT '4' CHECK(axis_type_snapshot IN ('4','5')),
+    machine_serial TEXT NOT NULL,
+    customer_name TEXT NOT NULL DEFAULT '',
+    expected_ship_date TEXT,
+    reinspection_reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','started','completed','cancelled')),
+    worker_id INTEGER REFERENCES inspection_worker(id),
+    worker_no_snapshot TEXT,
+    worker_name_snapshot TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    cancelled_at TEXT,
+    cancelled_by TEXT
+);
+CREATE TABLE IF NOT EXISTS inspection_barcode_record (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES inspection_order(id),
+    barcode_type TEXT NOT NULL CHECK(barcode_type IN ('START','FINISH')),
+    payload TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    UNIQUE(order_id, barcode_type)
+);
+CREATE TABLE IF NOT EXISTS inspection_scan_event (
+    event_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    barcode_type TEXT,
+    order_id INTEGER REFERENCES inspection_order(id),
+    employee_no TEXT,
+    result TEXT NOT NULL,
+    message TEXT NOT NULL,
+    scanned_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inspection_audit_log (
+    log_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    details TEXT,
+    operator_name TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inspection_order_status ON inspection_order(status);
+CREATE INDEX IF NOT EXISTS idx_inspection_order_created_at ON inspection_order(created_at);
+CREATE INDEX IF NOT EXISTS idx_inspection_order_machine_serial ON inspection_order(machine_serial);
+CREATE INDEX IF NOT EXISTS idx_inspection_scan_event_time ON inspection_scan_event(scanned_at);
+CREATE INDEX IF NOT EXISTS idx_inspection_audit_log_time ON inspection_audit_log(created_at);
+"""
+
+
 def init_db():
     db = get_db()
+    db.executescript(INSPECTION_SCHEMA)
+    migrate_inspection_schema(db)
+    db.execute("INSERT OR IGNORE INTO inspection_schema_migrations(version, applied_at) VALUES (?, ?)", (1, utc_now()))
+    defaults = {
+        "access_password_enabled": "1",
+        "access_password_hash": generate_password_hash(current_app.config["INITIAL_ACCESS_PASSWORD"]),
+    }
+    for key, value in defaults.items():
+        db.execute("INSERT OR IGNORE INTO inspection_app_settings(key,value,updated_at) VALUES(?,?,?)", (key, value, utc_now()))
+    db.commit()
+    return
+
+
+def migrate_inspection_schema(db):
+    """Add inspection fields introduced after the initial standalone schema."""
+    model_columns = {row["name"] for row in db.execute("PRAGMA table_info(inspection_model_master)")}
+    if "axis_type" not in model_columns:
+        db.execute("ALTER TABLE inspection_model_master ADD COLUMN axis_type TEXT NOT NULL DEFAULT '4' CHECK(axis_type IN ('4','5'))")
+
+    order_columns = {row["name"] for row in db.execute("PRAGMA table_info(inspection_order)")}
+    if "axis_type_snapshot" not in order_columns:
+        db.execute("ALTER TABLE inspection_order ADD COLUMN axis_type_snapshot TEXT NOT NULL DEFAULT '4' CHECK(axis_type_snapshot IN ('4','5'))")
+    db.execute("UPDATE inspection_model_master SET axis_type=CASE WHEN UPPER(TRIM(model_name)) LIKE 'F%' OR UPPER(TRIM(model_name)) LIKE 'M%' THEN '5' ELSE '4' END")
+    db.execute("UPDATE inspection_order SET axis_type_snapshot=CASE WHEN UPPER(TRIM(model_name_snapshot)) LIKE 'F%' OR UPPER(TRIM(model_name_snapshot)) LIKE 'M%' OR UPPER(TRIM(machine_serial)) LIKE 'S%' THEN '5' ELSE '4' END")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_inspection_order_axis_type ON inspection_order(axis_type_snapshot)")
+    db.execute("INSERT OR IGNORE INTO inspection_schema_migrations(version, applied_at) VALUES (?, ?)", (2, utc_now()))
+
     db.executescript(SCHEMA)
     needs_batch_mode_migration = db.execute("SELECT 1 FROM schema_migrations WHERE version=2").fetchone() is None
     columns = {row["name"] for row in db.execute("PRAGMA table_info(barcode_record)").fetchall()}

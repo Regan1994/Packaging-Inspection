@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>建立訂單</h1>
+<form method="post" class="panel form-wide">
+  <p class="muted">建立時不指定校機人員；員工會在掃描 START 時認領訂單。</p>
+  <div class="grid two"><label>訂單號碼<input name="order_no" required maxlength="80"></label><label>機台製號<input name="machine_serial" required maxlength="80"></label></div>
+  <label>機型<input name="model_name" required maxlength="100" placeholder="例如 HR-255"></label>
+  <p class="muted">系統自動判斷：機型 F／M 開頭，或機台製號 S 開頭，判定為五軸；其他判定為四軸。</p>
+  <div class="grid two"><label>客戶名稱（可選）<input name="customer_name"></label><label>預計出貨日期（可選）<input type="date" name="expected_ship_date"></label></div>
+  <label>重新檢驗/改單原因（可選）<textarea name="reinspection_reason"></textarea></label>
+  <button class="button primary">建立訂單並產生條碼</button>
+</form>
+{% endblock %}

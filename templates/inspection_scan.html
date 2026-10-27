@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>校機掃描</h1>
+<section class="panel scan-panel">
+  {% if current_worker %}<div class="warning"><strong>目前員工：{{ current_worker.name }}（{{ current_worker.employee_no }}）</strong><br>請掃描訂單 START 或 FINISH；處理訂單條碼後會清除員工身分。</div>{% else %}<p class="warning">請先掃描員工條碼。</p>{% endif %}
+  <form method="post" id="scan-form"><label>條碼輸入<input id="payload" name="payload" autofocus autocomplete="off" placeholder="等待掃描…"></label><button class="button primary">送出掃描</button></form>
+  {% if result %}<div class="scan-result {{ result.result }}"><strong>{{ result.result }}</strong><span>{{ result.message }}</span><small>掃描時間：{{ format_datetime(result.scanned_at) }}</small><small>掃描內容：<code>{{ result.payload }}</code></small></div>{% endif %}
+</section>
+{% endblock %}

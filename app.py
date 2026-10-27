@@ -12,7 +12,7 @@ app = create_app()
 
 def open_browser():
     time.sleep(1)
-    webbrowser.open(f"http://{Config.HOST}:{Config.PORT}")
+    webbrowser.open(f"http://{Config.BROWSER_HOST}:{Config.PORT}")
 
 
 if __name__ == "__main__":

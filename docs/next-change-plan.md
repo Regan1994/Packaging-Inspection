@@ -1,5 +1,7 @@
 # INTJR 條碼報工系統｜下一階段修改計畫
 
+> 歷史文件：本檔描述舊組裝流程的修改計畫，不代表目前校機系統需求。請改讀 `docs/final-inspection-requirements.md` 與 `docs/inspection-current-status.md`。
+
 更新日期：2026-10-19
 
 ## 本階段已完成：產品製號與批次報工

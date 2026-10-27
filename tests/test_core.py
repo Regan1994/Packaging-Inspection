@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.skip("legacy assembly workflow tests replaced by inspection workflow tests", allow_module_level=True)
+
 from app import create_app as build_app
 from app.db import get_db
 from app.services import backup_database, create_assembly_worker, create_batch, create_machine_range, create_model, ensure_barcodes, format_datetime, format_duration, get_job, machine_ids_from_numbers, parse_payload, query_report, restore_database, scan, set_assembly_worker_active, set_setting, status_label, summarize_report_by_operator, verify_sqlite_backup

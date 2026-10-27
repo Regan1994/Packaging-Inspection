@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>機型主檔</h1>
+<div class="grid">
+  <section class="panel"><h2>新增機型</h2><p class="muted">只需輸入現場使用的機型名稱；系統會自動建立內部代碼與基本軸別。</p><p class="muted">機型 F／M 開頭判定為五軸，其他機型為四軸；若機台製號 S 開頭，該筆訂單也會判定為五軸。</p><form method="post"><label>機型名稱<input name="model_name" required></label><label>說明<textarea name="description"></textarea></label><button class="button primary">建立</button></form></section>
+  <section class="panel table-wrap"><h2>現有機型</h2><table><tr><th>名稱</th><th>自動判定軸別</th><th>狀態</th><th>操作</th></tr>{% for model in models %}<tr><td>{{ model.model_name }}</td><td>{{ '五軸' if model.axis_type == '5' else '四軸' }}</td><td>{{ '啟用' if model.is_active else '停用' }}</td><td><div class="model-actions"><form method="post" action="{{ url_for('main.model_update', model_id=model.id) }}" class="inline"><input name="model_name" value="{{ model.model_name }}" required><select name="is_active"><option value="1" {% if model.is_active %}selected{% endif %}>啟用</option><option value="0" {% if not model.is_active %}selected{% endif %}>停用</option></select><button class="button small">保存</button></form><form method="post" action="{{ url_for('main.model_delete', model_id=model.id) }}" class="inline"><input type="hidden" name="expected_name" value="{{ model.model_name }}"><button class="button small danger">刪除</button></form></div></td></tr>{% else %}<tr><td colspan="4">尚無機型</td></tr>{% endfor %}</table></section>
+</div>
+{% endblock %}

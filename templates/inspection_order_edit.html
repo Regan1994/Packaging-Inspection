@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>編輯訂單</h1>
+<section class="panel">
+  <h2>{{ order.order_no }}</h2>
+  <div class="grid two">
+    <p><strong>機型：</strong>{{ order.model_name_snapshot }}</p>
+    <p><strong>軸別：</strong>{{ '五軸' if order.axis_type_snapshot == '5' else '四軸' }}</p>
+    <p><strong>機台製號：</strong>{{ order.machine_serial }}</p>
+    <p><strong>客戶：</strong>{{ order.customer_name or '-' }}</p>
+    <p><strong>校機人員：</strong>{{ order.worker_name_snapshot or '未認領' }}</p>
+    <p><strong>狀態：</strong>{{ status_label(order.status) }}</p>
+  </div>
+  <div class="row">
+    <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>
+    {% if order.status == 'pending' %}
+    <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" class="inline" onsubmit="return confirm('確定取消這筆訂單？取消後會保留歷史紀錄。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">取消訂單</button></form>
+    <form method="post" action="{{ url_for('main.order_delete', order_id=order.id) }}" class="inline" onsubmit="return confirm('確定刪除這筆尚未開始的訂單？刪除前會先備份，刪除後無法復原。');"><input type="hidden" name="csrf_token" value="{{ delete_token }}"><input type="hidden" name="expected_order_no" value="{{ order.order_no }}"><input type="hidden" name="confirmation" value="刪除"><input type="hidden" name="next" value="{{ delete_next }}"><button class="button danger">刪除訂單</button></form>
+    {% elif order.status == 'started' %}
+    <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" class="inline" onsubmit="return confirm('確定取消這筆校機中的訂單？取消後會保留歷史紀錄。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">取消訂單</button></form>
+    {% endif %}
+    <a class="button" href="{{ url_for('main.reports') }}">返回訂單明細</a>
+  </div>
+</section>
+{% endblock %}

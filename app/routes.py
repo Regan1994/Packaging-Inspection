@@ -335,3 +335,352 @@ def restore():
         flash(f"還原失敗：{exc}", "error")
     return redirect(url_for("main.settings"))
 
+
+# The original assembly blueprint is intentionally left above for historical
+# reference.  The registered blueprint below is the final-inspection UI and
+# uses only inspection-prefixed service functions/tables.
+from .services import (
+    access_password_enabled,
+    axis_type_label,
+    backup_database,
+    cancel_order,
+    change_access_password,
+    clear_debug_data,
+    create_inspection_worker,
+    create_model,
+    create_order,
+    debug_clear_counts,
+    delete_order,
+    delete_model,
+    ensure_order_barcodes,
+    ensure_worker_barcode,
+    export_xlsx,
+    get_inspection_worker,
+    get_order,
+    list_inspection_workers,
+    list_models,
+    list_report_workers,
+    query_report,
+    restore_database,
+    scan,
+    set_access_password_enabled,
+    set_inspection_worker_active,
+    status_label,
+    summarize_report_by_axis,
+    summarize_report_by_worker,
+    delete_inspection_worker,
+    update_inspection_worker,
+    update_model,
+    verify_access_password,
+)
+
+bp = Blueprint("main", __name__)
+PROTECTED_ENDPOINTS = {
+    "main.models", "main.model_update", "main.model_delete", "main.inspection_workers",
+    "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
+    "main.order_edit", "main.order_print", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
+    "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
+    "main.backup", "main.restore",
+}
+
+
+def safe_next_path(value):
+    return value if value and value.startswith("/") and not value.startswith("//") else url_for("main.index")
+
+
+@bp.before_request
+def require_admin_unlock():
+    if request.endpoint not in PROTECTED_ENDPOINTS or not access_password_enabled() or session.get("admin_unlocked"):
+        return None
+    next_path = request.full_path.rstrip("?")
+    return redirect(url_for("main.unlock", next=next_path))
+
+
+def _home_stats():
+    row = get_db().execute("SELECT SUM(status='pending') pending,SUM(status='started') started,SUM(status='completed') completed,SUM(status='cancelled') cancelled FROM inspection_order").fetchone()
+    return [{"label": status_label(key), "count": row[key] or 0, "filter": key} for key in ("pending", "started", "completed", "cancelled")]
+
+
+def _home_axis_stats():
+    rows = get_db().execute("SELECT axis_type_snapshot,COUNT(*) AS count FROM inspection_order GROUP BY axis_type_snapshot").fetchall()
+    counts = {str(row["axis_type_snapshot"] or "4"): row["count"] for row in rows}
+    return [{"axis_type": axis_type, "label": axis_type_label(axis_type), "count": counts.get(axis_type, 0)} for axis_type in ("4", "5")]
+
+
+@bp.route("/", methods=["GET"])
+def index():
+    current_worker = get_inspection_worker(session["scan_worker_id"]) if session.get("scan_worker_id") else None
+    return render_template("dashboard.html", stats=_home_stats(), axis_stats=_home_axis_stats(), current_worker=current_worker)
+
+
+@bp.route("/unlock", methods=["GET", "POST"])
+def unlock():
+    next_path = safe_next_path(request.form.get("next") if request.method == "POST" else request.args.get("next"))
+    if request.method == "POST":
+        if verify_access_password(request.form.get("password", "")):
+            session["admin_unlocked"] = True
+            return redirect(next_path)
+        flash("密碼錯誤，請重新輸入", "error")
+    return render_template("unlock.html", next_path=next_path)
+
+
+@bp.route("/models", methods=["GET", "POST"])
+def models():
+    if request.method == "POST":
+        try:
+            create_model(request.form.get("model_name"), request.form.get("model_code"), request.form.get("description", ""))
+            flash("機型已建立", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+    return render_template("inspection_models.html", models=list_models())
+
+
+@bp.post("/models/<int:model_id>/update")
+def model_update(model_id):
+    try:
+        update_model(model_id, request.form.get("model_name"), request.form.get("model_code"), request.form.get("description", ""), request.form.get("is_active") == "1")
+        flash("機型已更新", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.models"))
+
+
+@bp.post("/models/<int:model_id>/delete")
+def model_delete(model_id):
+    try:
+        backup = delete_model(model_id, request.form.get("expected_name", ""), current_app.config["BACKUP_DIRECTORY"])
+        flash(f"機型已刪除；資料庫備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有刪除機型：{exc}", "error")
+    return redirect(url_for("main.models"))
+
+
+@bp.route("/inspection-workers", methods=["GET", "POST"])
+def inspection_workers():
+    if request.method == "POST":
+        try:
+            create_inspection_worker(request.form.get("employee_no"), request.form.get("name"))
+            flash("校機人員已新增", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+    return render_template("inspection_workers.html", workers=list_inspection_workers())
+
+
+@bp.post("/inspection-workers/<int:worker_id>/status")
+def inspection_worker_status(worker_id):
+    try:
+        set_inspection_worker_active(worker_id, request.form.get("is_active") == "1")
+        flash("校機人員狀態已更新", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.inspection_workers"))
+
+
+@bp.post("/inspection-workers/<int:worker_id>/update")
+def inspection_worker_update(worker_id):
+    try:
+        update_inspection_worker(worker_id, request.form.get("employee_no"), request.form.get("name"))
+        flash("校機人員已更新", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.inspection_workers"))
+
+
+@bp.post("/inspection-workers/<int:worker_id>/delete")
+def inspection_worker_delete(worker_id):
+    try:
+        backup = delete_inspection_worker(
+            worker_id,
+            request.form.get("expected_employee_no", ""),
+            request.form.get("confirmation", ""),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"校機人員已刪除；已先備份至 {backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有刪除校機人員：{exc}", "error")
+    return redirect(url_for("main.inspection_workers"))
+
+
+@bp.get("/inspection-workers/print")
+def worker_print():
+    raw_ids = request.args.getlist("ids")
+    ids = {int(value) for value in raw_ids if value.isdigit()}
+    workers = [ensure_worker_barcode(worker["id"]) for worker in list_inspection_workers() if worker["id"] in ids]
+    return render_template("print_workers.html", workers=workers, code128_svg=code128_svg)
+
+
+@bp.route("/orders/new", methods=["GET", "POST"])
+def orders_new():
+    if request.method == "POST":
+        try:
+            order_id = create_order(request.form.get("order_no"), machine_serial=request.form.get("machine_serial"), customer_name=request.form.get("customer_name"), expected_ship_date=request.form.get("expected_ship_date"), reinspection_reason=request.form.get("reinspection_reason"), model_name=request.form.get("model_name"))
+            return redirect(url_for("main.order_print", order_id=order_id))
+        except (ValueError, KeyError) as exc:
+            flash(str(exc), "error")
+    return render_template("inspection_order_new.html")
+
+
+@bp.get("/orders/recent")
+def orders():
+    return redirect(url_for("main.reports"))
+
+
+@bp.get("/orders/<int:order_id>/edit")
+def order_edit(order_id):
+    order = get_order(order_id)
+    if not order:
+        return "找不到訂單", 404
+    token = session.get("order_delete_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["order_delete_token"] = token
+    return render_template(
+        "inspection_order_edit.html",
+        order=order,
+        delete_token=token,
+        delete_next=url_for("main.reports"),
+        edit_next=url_for("main.order_edit", order_id=order_id),
+    )
+
+
+@bp.get("/orders/<int:order_id>/print")
+def order_print(order_id):
+    order = get_order(order_id)
+    if not order:
+        return "找不到訂單", 404
+    ensure_order_barcodes(order_id)
+    records = get_db().execute("SELECT * FROM inspection_barcode_record WHERE order_id=? ORDER BY CASE barcode_type WHEN 'START' THEN 0 ELSE 1 END", (order_id,)).fetchall()
+    return render_template("inspection_print_order.html", order=order, records=records, code128_svg=code128_svg)
+
+
+@bp.post("/orders/<int:order_id>/cancel")
+def order_cancel(order_id):
+    try:
+        cancel_order(order_id)
+        flash("訂單已取消，歷史資料保留", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(safe_next_path(request.form.get("next")))
+
+
+@bp.post("/orders/<int:order_id>/delete")
+def order_delete(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    token = session.get("order_delete_token", "")
+    if not token or not hmac.compare_digest(token, request.form.get("csrf_token", "")):
+        flash("刪除確認已失效，請重新開啟訂單明細", "error")
+        return redirect(next_path)
+    try:
+        backup, removed = delete_order(order_id, request.form.get("expected_order_no", ""), request.form.get("confirmation", ""), current_app.config["BACKUP_DIRECTORY"])
+        session.pop("order_delete_token", None)
+        flash(f"訂單已刪除；已先備份至 {backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有刪除訂單：{exc}", "error")
+    return redirect(next_path)
+
+
+@bp.route("/scan", methods=["GET", "POST"])
+def scan_page():
+    result = None
+    if request.method == "POST":
+        payload = request.form.get("payload", "")
+        result = scan(payload, session.get("scan_worker_id"))
+        result["payload"] = payload
+        if result.get("scan_kind") == "employee" and result.get("worker_id"):
+            session["scan_worker_id"] = result["worker_id"]
+        elif result.get("scan_kind") == "order":
+            session.pop("scan_worker_id", None)
+    current_worker = get_inspection_worker(session["scan_worker_id"]) if session.get("scan_worker_id") else None
+    return render_template("inspection_scan.html", result=result, current_worker=current_worker)
+
+
+@bp.post("/api/scan")
+def api_scan():
+    result = scan(request.json.get("payload", "") if request.is_json else request.form.get("payload", ""), session.get("scan_worker_id"))
+    if result.get("scan_kind") == "employee" and result.get("worker_id"):
+        session["scan_worker_id"] = result["worker_id"]
+    elif result.get("scan_kind") == "order":
+        session.pop("scan_worker_id", None)
+    return jsonify(result), 200 if result["result"] in {"success", "duplicate"} else 400
+
+
+@bp.route("/reports", methods=["GET", "POST"])
+def reports():
+    filters = request.form.to_dict() if request.method == "POST" else request.args.to_dict()
+    rows = query_report(filters)
+    axis_summary_rows = query_report({})
+    token = session.get("order_delete_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["order_delete_token"] = token
+    return render_template("inspection_reports.html", rows=rows, summaries=summarize_report_by_worker(rows), axis_summaries=summarize_report_by_axis(axis_summary_rows), filters=filters, workers=list_report_workers(), delete_token=token, delete_next=request.full_path.rstrip("?"))
+
+
+@bp.post("/reports/export")
+def reports_export():
+    filters = request.form.to_dict()
+    rows = query_report(filters)
+    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    tmp.close()
+    export_xlsx(rows, tmp.name)
+    return send_file(tmp.name, as_attachment=True, download_name="inspection_report.xlsx")
+
+
+@bp.get("/settings")
+def settings():
+    return render_template("settings.html", password_enabled=access_password_enabled())
+
+
+@bp.post("/settings/password")
+def change_password():
+    try:
+        if request.form.get("new_password") != request.form.get("confirm_password"):
+            raise ValueError("兩次輸入的新密碼不一致")
+        change_access_password(request.form.get("current_password"), request.form.get("new_password"))
+        flash("密碼已更新", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.settings"))
+
+
+@bp.post("/settings/password-mode")
+def password_mode():
+    enabled = request.form.get("password_enabled") == "1"
+    set_access_password_enabled(enabled)
+    if not enabled:
+        session.pop("admin_unlocked", None)
+    flash("功能密碼設定已更新", "success")
+    return redirect(url_for("main.settings"))
+
+
+@bp.route("/debug/clear", methods=["GET", "POST"])
+def debug_clear():
+    if request.method == "POST":
+        try:
+            backup, removed = clear_debug_data(request.form.getlist("items"), request.form.get("confirmation", ""), current_app.config["BACKUP_DIRECTORY"])
+            flash(f"清除完成；已先備份至 {backup.name}。清除筆數：{sum(removed.values())}", "success")
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            flash(f"沒有清除資料：{exc}", "error")
+        return redirect(url_for("main.debug_clear"))
+    return render_template("inspection_debug_clear.html", counts=debug_clear_counts(), choices=DEBUG_CLEAR_CHOICES)
+
+
+@bp.post("/backup")
+def backup():
+    try:
+        target = backup_database(current_app.config["BACKUP_DIRECTORY"])
+        flash(f"備份完成：{target.name}", "success")
+    except Exception as exc:
+        flash(f"備份失敗：{exc}", "error")
+    return redirect(url_for("main.index"))
+
+
+@bp.post("/restore")
+def restore():
+    try:
+        restore_database(request.form.get("source_path", "").strip(), current_app.config["DATABASE"], current_app.config["BACKUP_DIRECTORY"])
+        flash("還原完成，請重新啟動應用程式", "success")
+    except Exception as exc:
+        flash(f"還原失敗：{exc}", "error")
+    return redirect(url_for("main.settings"))
+

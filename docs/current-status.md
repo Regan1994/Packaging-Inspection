@@ -1,5 +1,7 @@
 # INTJR 條碼報工系統｜目前狀態
 
+> 歷史文件：本檔描述舊組裝流程，不代表目前 `codex/final-inspection` 的 TJR校機報工系統。請改讀 `docs/inspection-current-status.md`。
+
 更新日期：2026-10-19
 
 ## 專案與啟動

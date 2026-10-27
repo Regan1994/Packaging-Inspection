@@ -5,19 +5,19 @@ Set-Location $PSScriptRoot
 Write-Host "Running tests..."
 python -m pytest -q --basetemp .pytest-tmp
 
-Write-Host "Building INTJR onedir package..."
+Write-Host "Building Inspection Reporting onedir package..."
 python -m PyInstaller `
     --noconfirm `
     --clean `
     --onedir `
-    --name INTJR `
+    --name InspectionReporting `
     --contents-directory . `
     --add-data "templates;templates" `
     --add-data "static;static" `
     app.py
 
-New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot "dist\INTJR\instance\backups") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot "dist\InspectionReporting\instance\backups") | Out-Null
 
 Write-Host ""
-Write-Host "Build complete: $PSScriptRoot\dist\INTJR"
-Write-Host "Run: .\dist\INTJR\INTJR.exe"
+Write-Host "Build complete: $PSScriptRoot\dist\InspectionReporting"
+Write-Host "Run: .\dist\InspectionReporting\InspectionReporting.exe"

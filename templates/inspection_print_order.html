@@ -1,0 +1,6 @@
+{% extends 'base.html' %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='print-label.css') }}">{% endblock %}
+{% block content %}
+<div class="print-toolbar"><div><h1>訂單條碼列印</h1><p>訂單：<code>{{ order.order_no }}</code>　機型：{{ order.model_name_snapshot }}　機台製號：{{ order.machine_serial }}</p></div><button class="button primary" onclick="window.print()">列印</button></div>
+<section class="print-sheet"><article class="thermal-label order-label"><div class="thermal-heading"><div class="thermal-model-line"><strong>{{ order.model_name_snapshot }}</strong></div><div class="thermal-details"><span class="thermal-serials">訂單：{{ order.order_no }}　製號：{{ order.machine_serial }}</span></div></div><div class="thermal-barcodes">{% for record in records %}<div class="barcode-card"><h3>{{ 'START 開始' if record.barcode_type == 'START' else 'FINISH 完成' }}</h3><div class="barcode">{{ code128_svg(record.payload)|safe }}</div></div>{% endfor %}</div></article></section>
+{% endblock %}
