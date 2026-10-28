@@ -9,7 +9,9 @@
     <p><strong>機台製號：</strong>{{ order.machine_serial }}</p>
     <p><strong>客戶：</strong>{{ order.customer_name or '-' }}</p>
     <p><strong>校機人員：</strong>{{ order.worker_name_snapshot or '未認領' }}</p>
-    <p><strong>狀態：</strong>{{ status_label(order.status) }}</p>
+    <p><strong>狀態：</strong>{{ '缺料暫停' if order.material_paused else status_label(order.status) }}</p>
+    <p><strong>缺料總時間：</strong>{{ format_seconds(order.material_pause_seconds) }}</p>
+    <p><strong>實際校機工時：</strong>{{ format_duration(order.started_at, order.finished_at, order.status, order.material_pause_seconds) }}</p>
   </div>
   <div class="row">
     <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>
@@ -22,4 +24,5 @@
     <a class="button" href="{{ url_for('main.reports') }}">返回訂單明細</a>
   </div>
 </section>
+{% if material_pauses %}<section class="panel table-wrap"><h2>缺料紀錄</h2><table><tr><th>缺料時間</th><th>補料時間</th><th>缺料登記人</th><th>補料登記人</th><th>暫停時長</th></tr>{% for pause in material_pauses %}<tr><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未補料' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}</table></section>{% endif %}
 {% endblock %}

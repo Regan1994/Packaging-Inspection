@@ -1,0 +1,6 @@
+{% extends 'base.html' %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='print-label.css') }}">{% endblock %}
+{% block content %}
+<div class="print-toolbar"><div><h1>固定缺料／補料條碼</h1><p>列印後放置於校機掃描區，搭配員工條碼及訂單 START 條碼使用。</p></div><button class="button primary" onclick="window.print()">列印</button></div>
+<section class="print-sheet">{% for record in records %}<article class="thermal-label worker-label material-action-label"><div class="thermal-heading"><div class="thermal-model-line"><strong>{{ record.label }}</strong></div></div><div class="thermal-barcodes"><div class="barcode-card"><h3>{{ record.label }}固定條碼</h3><div class="barcode">{{ code128_svg(record.payload)|safe }}</div><small>{{ record.payload }}</small></div></div></article>{% endfor %}</section>
+{% endblock %}

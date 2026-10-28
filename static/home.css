@@ -19,3 +19,5 @@
 .home-backup form{margin-top:auto}
 @media(max-width:1000px){.home-layout{grid-template-columns:1fr}.home-actions{grid-column:auto;grid-row:auto;grid-template-columns:repeat(2,minmax(0,1fr))}.home-card,.home-primary-card{grid-column:span 1}.home-sidebar{grid-column:auto;grid-row:auto;margin-top:0}}
 @media(max-width:650px){.home-actions{grid-template-columns:1fr}.home-card,.home-primary-card{grid-column:span 1;min-height:0;padding:22px}.home-card-action{margin-top:8px}.home-sidebar{display:block}.home-status{margin-top:16px}}
+.home-version{position:fixed;left:18px;bottom:12px;color:#829ab1;font-size:.8rem;font-weight:700;letter-spacing:.08em;background:#f4f6f8cc;padding:3px 7px;border-radius:5px}
+@media(max-width:650px){.home-version{position:static;margin-top:18px;text-align:left}}

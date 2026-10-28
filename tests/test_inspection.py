@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from app.db import get_db
@@ -8,8 +9,10 @@ from app.services import (
     create_model,
     create_order,
     ensure_order_barcodes,
+    format_duration,
     get_order,
     get_inspection_worker,
+    make_material_action_payload,
     make_order_payload,
     query_report,
     scan,
@@ -38,6 +41,10 @@ def payload_for(order_id, kind):
 
 def worker_barcode(worker_id):
     return get_db().execute("SELECT barcode FROM inspection_worker WHERE id=?", (worker_id,)).fetchone()["barcode"]
+
+
+def material_barcode(action):
+    return make_material_action_payload(action)
 
 
 def test_orders_allow_duplicate_machine_serial_but_not_order_number(app):
@@ -96,6 +103,17 @@ def test_report_drops_date_filters_and_can_delete_pending_order(client, app):
         assert get_db().execute("SELECT COUNT(*) FROM inspection_barcode_record WHERE order_id=?", (order_a,)).fetchone()[0] == 0
         assert get_db().execute("SELECT COUNT(*) FROM inspection_audit_log WHERE action='delete' AND entity_id=?", (str(order_a),)).fetchone()[0] == 1
     assert list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
+
+
+def test_report_uses_full_width_layout_and_separate_date_time_columns(client, app):
+    page = client.get("/reports").get_data(as_text=True)
+
+    assert '<main class="container report-container">' in page
+    assert 'class="report-detail-table"' in page
+    for heading in ("開始日期", "開始時間", "結束日期", "結束時間"):
+        assert f"<th>{heading}</th>" in page
+    assert "<th>開始</th>" not in page
+    assert "<th>完成</th>" not in page
 
 
 def test_worker_can_be_edited_and_deleted(client, app):
@@ -191,6 +209,69 @@ def test_employee_start_finish_is_bound_and_consumed(client, app):
         assert get_order(order_a)["worker_no_snapshot"] == "E001"
 
 
+def test_scanned_worker_can_be_replaced_or_cleared(client, app):
+    _, worker_a, worker_b, _, _ = setup_data(app)
+    with app.app_context():
+        assert client.post("/api/scan", json={"payload": worker_barcode(worker_a)}).json["worker_id"] == worker_a
+        replacement = client.post("/api/scan", json={"payload": worker_barcode(worker_b)})
+        assert replacement.json["worker_id"] == worker_b
+        with client.session_transaction() as session:
+            assert session["scan_worker_id"] == worker_b
+
+        response = client.post("/scan/reset")
+        assert response.status_code == 302
+        assert response.location.endswith("/scan")
+        with client.session_transaction() as session:
+            assert "scan_worker_id" not in session
+            assert "scan_material_action" not in session
+
+    page = client.get("/scan").get_data(as_text=True)
+    assert "請先掃描員工條碼" in page
+    assert "V403.10.28" not in page
+    assert "掃描操作說明" in page
+    assert "固定缺料條碼 → 該訂單 START" in page
+    assert "固定補料條碼 → 該訂單 START" in page
+    assert '<div class="home-version" aria-label="系統版本">V403.10.28</div>' in client.get("/").get_data(as_text=True)
+
+
+def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
+    _, worker_a, _, order_a, _ = setup_data(app)
+    with app.app_context():
+        employee_payload = worker_barcode(worker_a)
+        assert client.post("/api/scan", json={"payload": f"]C1\x02{employee_payload}\r\n"}).json["worker_id"] == worker_a
+
+        get_db().execute(
+            "UPDATE inspection_barcode_record SET payload='LEGACY-START-A001' WHERE order_id=? AND barcode_type='START'",
+            (order_a,),
+        )
+        get_db().commit()
+        response = client.post("/api/scan", json={"payload": "]C1LEGACY-START-A001\r"})
+        assert response.status_code == 200
+        assert response.json["result"] == "success"
+        assert get_order(order_a)["status"] == "started"
+
+
+def test_scan_accepts_lowercase_compact_barcodes(client, app):
+    _, worker_a, _, order_a, _ = setup_data(app)
+    with app.app_context():
+        assert client.post("/api/scan", json={"payload": worker_barcode(worker_a).lower()}).json["worker_id"] == worker_a
+        started = client.post("/api/scan", json={"payload": payload_for(order_a, "START").lower()})
+        assert started.status_code == 200
+        assert started.json["result"] == "success"
+
+        assert client.post("/api/scan", json={"payload": worker_barcode(worker_a).lower()}).status_code == 200
+        shortage = client.post("/api/scan", json={"payload": material_barcode("SHORTAGE").lower()})
+        assert shortage.status_code == 200
+        assert shortage.json["material_action"] == "SHORTAGE"
+
+
+def test_blank_database_scan_explains_instance_folder(client):
+    response = client.post("/api/scan", json={"payload": "UNKNOWN"})
+    assert response.status_code == 400
+    assert "空白資料庫" in response.json["message"]
+    assert "instance" in response.json["message"]
+
+
 def test_finish_requires_original_worker_and_duplicate_is_idempotent(client, app):
     _, worker_a, worker_b, order_a, _ = setup_data(app)
     with app.app_context():
@@ -205,6 +286,101 @@ def test_finish_requires_original_worker_and_duplicate_is_idempotent(client, app
         client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
         duplicate = client.post("/api/scan", json={"payload": payload_for(order_a, "FINISH")})
         assert duplicate.json["result"] == "duplicate"
+
+
+def test_material_shortage_pause_resume_and_net_work_time(client, app):
+    _, worker_a, _, order_a, _ = setup_data(app)
+    with app.app_context():
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        assert client.post("/api/scan", json={"payload": payload_for(order_a, "START")}).json["result"] == "success"
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        action = client.post("/api/scan", json={"payload": material_barcode("SHORTAGE")})
+        assert action.json["result"] == "success"
+        assert "訂單 START" in action.json["message"]
+        with client.session_transaction() as session:
+            assert session["scan_material_action"] == "SHORTAGE"
+            assert session["scan_worker_id"] == worker_a
+        paused = client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        assert paused.json["result"] == "success"
+        assert "停止計算工時" in paused.json["message"]
+        assert get_order(order_a)["material_paused"] == 1
+        assert len(query_report({"status_group": "material_paused"})) == 1
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        client.post("/api/scan", json={"payload": material_barcode("SHORTAGE")})
+        duplicate = client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        assert duplicate.json["result"] == "duplicate"
+        assert get_db().execute("SELECT COUNT(*) FROM inspection_material_pause WHERE order_id=?", (order_a,)).fetchone()[0] == 1
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        blocked_finish = client.post("/api/scan", json={"payload": payload_for(order_a, "FINISH")})
+        assert blocked_finish.status_code == 400
+        assert "先完成補料" in blocked_finish.json["message"]
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        client.post("/api/scan", json={"payload": material_barcode("REPLENISH")})
+        resumed = client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        assert resumed.json["result"] == "success"
+        assert "繼續計算工時" in resumed.json["message"]
+        assert get_order(order_a)["material_paused"] == 0
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        assert client.post("/api/scan", json={"payload": payload_for(order_a, "FINISH")}).json["result"] == "success"
+        db = get_db()
+        db.execute("UPDATE inspection_order SET started_at='2026-10-28T00:00:00+00:00',finished_at='2026-10-28T02:00:00+00:00' WHERE id=?", (order_a,))
+        db.execute("UPDATE inspection_material_pause SET paused_at='2026-10-28T00:30:00+00:00',resumed_at='2026-10-28T01:00:00+00:00' WHERE order_id=?", (order_a,))
+        db.commit()
+        report_row = query_report({"order_no": "A001"})[0]
+        assert report_row["material_pause_seconds"] == 1800
+        assert format_duration(report_row["started_at"], report_row["finished_at"], report_row["status"], report_row["material_pause_seconds"]) == "01:30:00"
+
+
+def test_material_barcodes_print_and_replenish_requires_open_pause(client, app):
+    _, worker_a, _, order_a, _ = setup_data(app)
+    page = client.get("/material-barcodes/print")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert "缺料固定條碼" in html
+    assert "補料固定條碼" in html
+    assert material_barcode("SHORTAGE") in html
+    assert material_barcode("REPLENISH") in html
+
+    with app.app_context():
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        client.post("/api/scan", json={"payload": material_barcode("REPLENISH")})
+        response = client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        assert response.status_code == 400
+        assert "沒有缺料暫停" in response.json["message"]
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        client.post("/api/scan", json={"payload": material_barcode("SHORTAGE")})
+        assert client.post("/api/scan", json={"payload": payload_for(order_a, "START")}).json["result"] == "success"
+        assert client.post(f"/orders/{order_a}/cancel", data={"next": "/reports"}).status_code == 302
+        pause = get_db().execute("SELECT * FROM inspection_material_pause WHERE order_id=?", (order_a,)).fetchone()
+        assert pause["resumed_at"] is not None
+        assert get_order(order_a)["material_paused"] == 0
+
+
+def test_existing_inspection_database_adds_material_pause_table_without_losing_orders(app):
+    setup_data(app)
+    database = app.config["DATABASE"]
+    backup_directory = app.config["BACKUP_DIRECTORY"]
+    with app.app_context():
+        db = get_db()
+        db.execute("DROP TABLE inspection_material_pause")
+        db.execute("DELETE FROM inspection_schema_migrations WHERE version=3")
+        db.commit()
+
+    from app import create_app
+    upgraded = create_app({"TESTING": True, "DATABASE": database, "BACKUP_DIRECTORY": backup_directory, "SECRET_KEY": "upgrade-test"})
+    with upgraded.app_context():
+        db = get_db()
+        assert db.execute("SELECT COUNT(*) FROM inspection_order").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM inspection_material_pause").fetchone()[0] == 0
+        assert db.execute("SELECT 1 FROM inspection_schema_migrations WHERE version=3").fetchone() is not None
 
 
 def test_inactive_worker_is_rejected(app, client):
@@ -252,6 +428,8 @@ def test_same_machine_history_report_and_excel(client, app, tmp_path):
         client.post("/api/scan", json={"payload": payload_for(order_a, "FINISH")})
         client.post("/api/scan", json={"payload": worker_barcode(worker_b)})
         client.post("/api/scan", json={"payload": payload_for(order_b, "START")})
+        get_db().execute("UPDATE inspection_order SET started_at='2026-10-28T01:02:03+00:00',finished_at='2026-10-28T04:05:06+00:00' WHERE id=?", (order_a,))
+        get_db().commit()
         rows = query_report({"machine_serial": "E27-01"})
         assert len(rows) == 2
         assert {row["order_no"] for row in rows} == {"A001", "A002"}
@@ -260,9 +438,17 @@ def test_same_machine_history_report_and_excel(client, app, tmp_path):
         from app.services import export_xlsx
         export_xlsx(rows, output)
         assert output.is_file()
+        from openpyxl import load_workbook
+        workbook = load_workbook(output, read_only=True)
+        detail = workbook["訂單明細"]
+        assert [cell.value for cell in detail[1]] == ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態", "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "實際校機工時", "重新檢驗原因"]
+        assert "員工編號" not in [cell.value for cell in detail[1]]
+        exported_rows = {values[0]: values for values in detail.iter_rows(min_row=2, values_only=True)}
+        assert exported_rows["A001"][9:13] == ("2026-10-28", "09:02:03", "2026-10-28", "12:05:06")
     response = client.post("/reports/export", data={"machine_serial": "E27-01"})
     assert response.status_code == 200
     assert response.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert f"{datetime.now():%Y%m%d}Report.xlsx" in response.headers["Content-Disposition"]
 
 
 def test_excel_export_treats_user_text_as_text(app, tmp_path):

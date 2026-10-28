@@ -2,8 +2,24 @@
 {% block content %}
 <h1>校機掃描</h1>
 <section class="panel scan-panel">
-  {% if current_worker %}<div class="warning"><strong>目前員工：{{ current_worker.name }}（{{ current_worker.employee_no }}）</strong><br>請掃描訂單 START 或 FINISH；處理訂單條碼後會清除員工身分。</div>{% else %}<p class="warning">請先掃描員工條碼。</p>{% endif %}
+  {% if current_worker %}<div class="warning"><strong>目前員工：{{ current_worker.name }}（{{ current_worker.employee_no }}）</strong>{% if pending_action_label %}<br><strong>已選擇「{{ pending_action_label }}」：請掃描該機台的訂單 START 條碼。</strong>{% else %}<br>請掃描訂單 START、FINISH、缺料或補料；也可以直接掃另一位員工條碼更換人員。{% endif %}<form method="post" action="{{ url_for('main.scan_reset') }}" class="scan-reset-form"><button class="button small" type="submit">清除／更換人員</button></form></div>{% else %}<p class="warning">請先掃描員工條碼。</p>{% endif %}
   <form method="post" id="scan-form"><label>條碼輸入<input id="payload" name="payload" autofocus autocomplete="off" placeholder="等待掃描…"></label><button class="button primary">送出掃描</button></form>
+  <p><a class="button" href="{{ url_for('main.material_barcodes_print') }}">列印固定缺料／補料條碼</a></p>
   {% if result %}<div class="scan-result {{ result.result }}"><strong>{{ result.result }}</strong><span>{{ result.message }}</span><small>掃描時間：{{ format_datetime(result.scanned_at) }}</small><small>掃描內容：<code>{{ result.payload }}</code></small></div>{% endif %}
+</section>
+<section class="panel scan-guide" aria-labelledby="scan-guide-title">
+  <h2 id="scan-guide-title">掃描操作說明</h2>
+  <div class="scan-guide-grid">
+    <article><strong>1. 開始校機</strong><span>員工條碼 → 訂單 START</span></article>
+    <article><strong>2. 完成校機</strong><span>原認領員工條碼 → 訂單 FINISH</span></article>
+    <article><strong>3. 機台缺料</strong><span>原認領員工條碼 → 固定缺料條碼 → 該訂單 START</span></article>
+    <article><strong>4. 料件補齊</strong><span>原認領員工條碼 → 固定補料條碼 → 該訂單 START</span></article>
+  </div>
+  <ul class="scan-guide-notes">
+    <li>缺料／補料流程中的 START 條碼只用來指定機台，不會重新開始訂單。</li>
+    <li>缺料期間停止計算實際工時；缺料中不能 FINISH，必須先完成補料掃描。</li>
+    <li>誤掃員工可直接掃正確員工；誤選員工、缺料或補料，也可按「清除／更換人員」重新操作。</li>
+    <li>完成一筆訂單操作後，系統會清除目前員工，下一次需重新掃員工條碼。</li>
+  </ul>
 </section>
 {% endblock %}

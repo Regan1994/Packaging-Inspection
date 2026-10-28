@@ -357,9 +357,11 @@ from .services import (
     export_xlsx,
     get_inspection_worker,
     get_order,
+    list_material_pauses,
     list_inspection_workers,
     list_models,
     list_report_workers,
+    material_action_barcodes,
     query_report,
     restore_database,
     scan,
@@ -380,7 +382,7 @@ PROTECTED_ENDPOINTS = {
     "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
     "main.order_edit", "main.order_print", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
-    "main.backup", "main.restore",
+    "main.backup", "main.restore", "main.material_barcodes_print",
 }
 
 
@@ -397,8 +399,19 @@ def require_admin_unlock():
 
 
 def _home_stats():
-    row = get_db().execute("SELECT SUM(status='pending') pending,SUM(status='started') started,SUM(status='completed') completed,SUM(status='cancelled') cancelled FROM inspection_order").fetchone()
-    return [{"label": status_label(key), "count": row[key] or 0, "filter": key} for key in ("pending", "started", "completed", "cancelled")]
+    row = get_db().execute(
+        """
+        SELECT
+            SUM(o.status='pending') pending,
+            SUM(o.status='started' AND NOT EXISTS(SELECT 1 FROM inspection_material_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL)) started,
+            SUM(o.status='started' AND EXISTS(SELECT 1 FROM inspection_material_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL)) material_paused,
+            SUM(o.status='completed') completed,
+            SUM(o.status='cancelled') cancelled
+        FROM inspection_order o
+        """
+    ).fetchone()
+    labels = {"pending": "待校機", "started": "校機中", "material_paused": "缺料暫停", "completed": "已完成", "cancelled": "已取消"}
+    return [{"label": labels[key], "count": row[key] or 0, "filter": key} for key in ("pending", "started", "material_paused", "completed", "cancelled")]
 
 
 def _home_axis_stats():
@@ -537,6 +550,7 @@ def order_edit(order_id):
     return render_template(
         "inspection_order_edit.html",
         order=order,
+        material_pauses=list_material_pauses(order_id),
         delete_token=token,
         delete_next=url_for("main.reports"),
         edit_next=url_for("main.order_edit", order_id=order_id),
@@ -551,6 +565,15 @@ def order_print(order_id):
     ensure_order_barcodes(order_id)
     records = get_db().execute("SELECT * FROM inspection_barcode_record WHERE order_id=? ORDER BY CASE barcode_type WHEN 'START' THEN 0 ELSE 1 END", (order_id,)).fetchall()
     return render_template("inspection_print_order.html", order=order, records=records, code128_svg=code128_svg)
+
+
+@bp.get("/material-barcodes/print")
+def material_barcodes_print():
+    return render_template(
+        "inspection_print_material_actions.html",
+        records=material_action_barcodes(),
+        code128_svg=code128_svg,
+    )
 
 
 @bp.post("/orders/<int:order_id>/cancel")
@@ -579,28 +602,50 @@ def order_delete(order_id):
     return redirect(next_path)
 
 
+@bp.post("/scan/reset")
+def scan_reset():
+    session.pop("scan_worker_id", None)
+    session.pop("scan_material_action", None)
+    flash("已清除目前員工與待處理的缺料／補料操作", "success")
+    return redirect(url_for("main.scan_page"))
+
+
 @bp.route("/scan", methods=["GET", "POST"])
 def scan_page():
     result = None
     if request.method == "POST":
         payload = request.form.get("payload", "")
-        result = scan(payload, session.get("scan_worker_id"))
+        result = scan(payload, session.get("scan_worker_id"), pending_material_action=session.get("scan_material_action"))
         result["payload"] = payload
         if result.get("scan_kind") == "employee" and result.get("worker_id"):
             session["scan_worker_id"] = result["worker_id"]
+            session.pop("scan_material_action", None)
+        elif result.get("scan_kind") == "material_action" and result.get("material_action"):
+            session["scan_material_action"] = result["material_action"]
         elif result.get("scan_kind") == "order":
             session.pop("scan_worker_id", None)
+            session.pop("scan_material_action", None)
     current_worker = get_inspection_worker(session["scan_worker_id"]) if session.get("scan_worker_id") else None
-    return render_template("inspection_scan.html", result=result, current_worker=current_worker)
+    pending_action = session.get("scan_material_action")
+    pending_action_label = {"SHORTAGE": "缺料", "REPLENISH": "補料"}.get(pending_action)
+    return render_template("inspection_scan.html", result=result, current_worker=current_worker, pending_action_label=pending_action_label)
 
 
 @bp.post("/api/scan")
 def api_scan():
-    result = scan(request.json.get("payload", "") if request.is_json else request.form.get("payload", ""), session.get("scan_worker_id"))
+    result = scan(
+        request.json.get("payload", "") if request.is_json else request.form.get("payload", ""),
+        session.get("scan_worker_id"),
+        pending_material_action=session.get("scan_material_action"),
+    )
     if result.get("scan_kind") == "employee" and result.get("worker_id"):
         session["scan_worker_id"] = result["worker_id"]
+        session.pop("scan_material_action", None)
+    elif result.get("scan_kind") == "material_action" and result.get("material_action"):
+        session["scan_material_action"] = result["material_action"]
     elif result.get("scan_kind") == "order":
         session.pop("scan_worker_id", None)
+        session.pop("scan_material_action", None)
     return jsonify(result), 200 if result["result"] in {"success", "duplicate"} else 400
 
 
@@ -623,7 +668,8 @@ def reports_export():
     tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
     tmp.close()
     export_xlsx(rows, tmp.name)
-    return send_file(tmp.name, as_attachment=True, download_name="inspection_report.xlsx")
+    filename = datetime.now().strftime("%Y%m%d") + "Report.xlsx"
+    return send_file(tmp.name, as_attachment=True, download_name=filename)
 
 
 @bp.get("/settings")
