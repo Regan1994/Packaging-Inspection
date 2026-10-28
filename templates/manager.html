@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>校機報工報表閱讀器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">校機報工報表閱讀器</span>
+    <span>唯讀查詢</span>
+  </header>
+  <main class="container report-container">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">MANAGER REPORT</p>
+        <h1>校機報工報表</h1>
+        <p class="muted">本頁只提供查詢，不提供建立、編輯、取消、刪除或條碼操作。</p>
+      </div>
+    </section>
+
+    {% if detail %}
+    <section class="panel">
+      <h2>訂單明細：{{ detail.order_no }}</h2>
+      <div class="grid three">
+        <p><strong>機型：</strong>{{ detail.model_name_snapshot }}</p>
+        <p><strong>軸別：</strong>{{ '五軸' if detail.axis_type_snapshot == '5' else '四軸' }}</p>
+        <p><strong>機台製號：</strong>{{ detail.machine_serial }}</p>
+        <p><strong>客戶：</strong>{{ detail.customer_name or '-' }}</p>
+        <p><strong>預計出貨日：</strong>{{ detail.expected_ship_date or '-' }}</p>
+        <p><strong>校機人員：</strong>{{ detail.worker_name_snapshot or '未認領' }}</p>
+        <p><strong>目前狀態：</strong>{% if detail.status == 'started' and detail.material_paused %}缺料暫停{% else %}{{ status_label(detail.status) }}{% endif %}</p>
+        <p><strong>建立時間：</strong>{{ format_datetime(detail.created_at) }}</p>
+        <p><strong>開始時間：</strong>{{ format_datetime(detail.started_at) }}</p>
+        <p><strong>結束時間：</strong>{{ format_datetime(detail.finished_at) }}</p>
+        <p><strong>總經過時間：</strong>{{ format_duration(detail.started_at, detail.finished_at, detail.status) }}</p>
+        <p><strong>缺料時間：</strong>{{ format_seconds(detail.material_pause_seconds) }}</p>
+        <p><strong>實際校機工時：</strong>{{ format_duration(detail.started_at, detail.finished_at, detail.status, detail.material_pause_seconds) }}</p>
+      </div>
+      {% if detail.reinspection_reason %}<p><strong>重新檢驗原因：</strong>{{ detail.reinspection_reason }}</p>{% endif %}
+      <a class="button" href="{{ url_for('main.manager', **filters) }}">返回查詢結果</a>
+    </section>
+
+    <section class="panel table-wrap">
+      <h2>缺料／停工紀錄</h2>
+      {% if material_pauses %}
+      <table>
+        <tr><th>開始時間</th><th>恢復時間</th><th>登記人員</th><th>恢復人員</th><th>區間</th></tr>
+        {% for pause in material_pauses %}
+        <tr>
+          <td>{{ format_datetime(pause.paused_at) }}</td>
+          <td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未恢復' }}</td>
+          <td>{{ pause.paused_by_name or '-' }}</td>
+          <td>{{ pause.resumed_by_name or '-' }}</td>
+          <td>{{ format_seconds(pause.duration_seconds) }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% else %}
+      <p class="empty">沒有缺料／停工紀錄。</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <section class="panel">
+      <form method="get" class="filters">
+        <label>訂單號碼<input name="order_no" value="{{ filters.get('order_no', '') }}"></label>
+        <label>機型<input name="model_name" value="{{ filters.get('model_name', '') }}"></label>
+        <label>機台製號<input name="machine_serial" value="{{ filters.get('machine_serial', '') }}"></label>
+        <label>校機人員<select name="worker_name"><option value="">全部</option>{% for worker in workers %}<option value="{{ worker.name }}" {% if filters.get('worker_name') == worker.name %}selected{% endif %}>{{ worker.name }}（{{ worker.employee_no }}）</option>{% endfor %}</select></label>
+        <label>狀態<select name="status_group"><option value="">全部</option><option value="pending" {% if filters.get('status_group') == 'pending' %}selected{% endif %}>待校機</option><option value="started" {% if filters.get('status_group') == 'started' %}selected{% endif %}>校機中</option><option value="material_paused" {% if filters.get('status_group') == 'material_paused' %}selected{% endif %}>缺料暫停</option><option value="completed" {% if filters.get('status_group') == 'completed' %}selected{% endif %}>已完成</option><option value="cancelled" {% if filters.get('status_group') == 'cancelled' %}selected{% endif %}>已取消</option><option value="incomplete" {% if filters.get('status_group') == 'incomplete' %}selected{% endif %}>未完成</option></select></label>
+        <button class="button primary">查詢</button>
+      </form>
+    </section>
+
+    <section class="panel table-wrap">
+      <h2>訂單查詢結果</h2>
+      <p class="muted">共 {{ rows|length }} 筆訂單</p>
+      <table class="report-detail-table">
+        <tr><th>訂單</th><th>機型</th><th>機台製號</th><th>校機人員</th><th>目前狀態</th><th>開始時間</th><th>結束時間</th><th>實際工時</th><th>明細</th></tr>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.order_no }}</td>
+          <td>{{ row.model_name_snapshot }}<small>{{ '五軸' if row.axis_type_snapshot == '5' else '四軸' }}</small></td>
+          <td>{{ row.machine_serial }}</td>
+          <td>{{ row.worker_name_snapshot or '未認領' }}</td>
+          <td>{% if row.status == 'started' and row.material_paused %}缺料暫停{% else %}{{ status_label(row.status) }}{% endif %}</td>
+          <td>{{ format_datetime(row.started_at) }}</td>
+          <td>{{ format_datetime(row.finished_at) }}</td>
+          <td>{{ format_duration(row.started_at, row.finished_at, row.status, row.material_pause_seconds) }}</td>
+          <td><a class="button small" href="{{ url_for('main.manager', detail_id=row.id, **filters) }}">查看明細</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="empty">沒有符合條件的訂單。</td></tr>
+        {% endfor %}
+      </table>
+    </section>
+  </main>
+</body>
+</html>

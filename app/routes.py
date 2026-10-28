@@ -661,6 +661,29 @@ def reports():
     return render_template("inspection_reports.html", rows=rows, summaries=summarize_report_by_worker(rows), axis_summaries=summarize_report_by_axis(axis_summary_rows), filters=filters, workers=list_report_workers(), delete_token=token, delete_next=request.full_path.rstrip("?"))
 
 
+@bp.get("/manager")
+def manager():
+    """Read-only report entry for the business manager viewer."""
+    filters = request.args.to_dict()
+    detail_id = (filters.pop("detail_id", "") or "").strip()
+    detail = None
+    material_pauses = []
+    if detail_id.isdigit():
+        detail = get_order(int(detail_id))
+        if detail:
+            material_pauses = list_material_pauses(detail["id"])
+
+    rows = query_report(filters)
+    return render_template(
+        "manager.html",
+        rows=rows,
+        filters=filters,
+        workers=list_report_workers(),
+        detail=detail,
+        material_pauses=material_pauses,
+    )
+
+
 @bp.post("/reports/export")
 def reports_export():
     filters = request.form.to_dict()
