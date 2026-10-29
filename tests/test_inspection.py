@@ -10,6 +10,7 @@ from app.services import (
     create_order,
     ensure_order_barcodes,
     format_duration,
+    format_work_duration,
     get_order,
     get_inspection_worker,
     make_material_action_payload,
@@ -110,10 +111,32 @@ def test_report_uses_full_width_layout_and_separate_date_time_columns(client, ap
 
     assert '<main class="container report-container">' in page
     assert 'class="report-detail-table"' in page
+    assert '<select name="axis_type">' in page
+    detail_section = page.split("<h2>訂單明細</h2>", 1)[1]
+    assert "<th>校機建立日期</th>" in detail_section
+    assert "<th>軸別</th>" not in detail_section
     for heading in ("開始日期", "開始時間", "結束日期", "結束時間"):
         assert f"<th>{heading}</th>" in page
     assert "<th>開始</th>" not in page
     assert "<th>完成</th>" not in page
+
+
+def test_report_detail_is_paginated_to_25_rows(client, app):
+    with app.app_context():
+        model_id = create_model("分頁測試機型")
+        for number in range(26):
+            create_order(f"PAGE-{number:02d}", model_id, f"P-{number:02d}")
+
+    first_page = client.get("/reports").get_data(as_text=True)
+    first_detail = first_page.split("<h2>訂單明細</h2>", 1)[1]
+    assert "共 26 筆訂單；目前第 1／2 頁" in first_detail
+    assert first_detail.count("<tr>") == 26
+    assert "page=2" in first_detail
+
+    second_page = client.get("/reports?page=2").get_data(as_text=True)
+    second_detail = second_page.split("<h2>訂單明細</h2>", 1)[1]
+    assert "共 26 筆訂單；目前第 2／2 頁" in second_detail
+    assert second_detail.count("<tr>") == 2
 
 
 def test_worker_can_be_edited_and_deleted(client, app):
@@ -227,11 +250,11 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
 
     page = client.get("/scan").get_data(as_text=True)
     assert "請先掃描員工條碼" in page
-    assert "V403.10.28" not in page
+    assert "V404.10.28" not in page
     assert "掃描操作說明" in page
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V403.10.28</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V404.10.28</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
@@ -333,7 +356,13 @@ def test_material_shortage_pause_resume_and_net_work_time(client, app):
         db.commit()
         report_row = query_report({"order_no": "A001"})[0]
         assert report_row["material_pause_seconds"] == 1800
-        assert format_duration(report_row["started_at"], report_row["finished_at"], report_row["status"], report_row["material_pause_seconds"]) == "01:30:00"
+        assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["material_pause_seconds"]) == "01:30:00"
+
+
+def test_work_duration_excludes_evenings_lunch_and_weekends():
+    assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-30T02:00:00+00:00") == "10:00:00"
+    assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-29T12:00:00+00:00") == "08:00:00"
+    assert format_work_duration("2026-10-30T00:00:00+00:00", "2026-11-02T02:00:00+00:00") == "10:00:00"
 
 
 def test_material_barcodes_print_and_replenish_requires_open_pause(client, app):

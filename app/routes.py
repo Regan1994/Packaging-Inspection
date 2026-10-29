@@ -13,6 +13,8 @@ from .services import ASSEMBLY_STAGES, DEBUG_CLEAR_CHOICES, access_password_enab
 
 bp = Blueprint("main", __name__)
 
+REPORT_PAGE_SIZE = 25
+
 PROTECTED_ENDPOINTS = {
     "main.models",
     "main.model_update",
@@ -652,13 +654,43 @@ def api_scan():
 @bp.route("/reports", methods=["GET", "POST"])
 def reports():
     filters = request.form.to_dict() if request.method == "POST" else request.args.to_dict()
-    rows = query_report(filters)
+    try:
+        current_page = max(1, int(filters.pop("page", "1") or 1))
+    except ValueError:
+        current_page = 1
+    all_rows = query_report(filters)
+    total_rows = len(all_rows)
+    total_pages = max(1, (total_rows + REPORT_PAGE_SIZE - 1) // REPORT_PAGE_SIZE)
+    current_page = min(current_page, total_pages)
+    page_start = (current_page - 1) * REPORT_PAGE_SIZE
+    rows = all_rows[page_start : page_start + REPORT_PAGE_SIZE]
+    pagination_links = []
+    for page_number in range(1, total_pages + 1):
+        page_filters = dict(filters)
+        page_filters["page"] = page_number
+        pagination_links.append({
+            "number": page_number,
+            "url": url_for("main.reports", **page_filters),
+        })
     axis_summary_rows = query_report({})
     token = session.get("order_delete_token")
     if not token:
         token = secrets.token_urlsafe(32)
         session["order_delete_token"] = token
-    return render_template("inspection_reports.html", rows=rows, summaries=summarize_report_by_worker(rows), axis_summaries=summarize_report_by_axis(axis_summary_rows), filters=filters, workers=list_report_workers(), delete_token=token, delete_next=request.full_path.rstrip("?"))
+    return render_template(
+        "inspection_reports.html",
+        rows=rows,
+        total_rows=total_rows,
+        current_page=current_page,
+        total_pages=total_pages,
+        pagination_links=pagination_links,
+        summaries=summarize_report_by_worker(all_rows),
+        axis_summaries=summarize_report_by_axis(axis_summary_rows),
+        filters=filters,
+        workers=list_report_workers(),
+        delete_token=token,
+        delete_next=request.full_path.rstrip("?"),
+    )
 
 
 @bp.get("/manager")

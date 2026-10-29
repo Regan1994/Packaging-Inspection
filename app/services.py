@@ -4,7 +4,7 @@ import re
 import shutil
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -965,6 +965,42 @@ def format_duration(started_at, finished_at, status=None, paused_seconds=0):
     return format_seconds(seconds)
 
 
+def format_work_duration(started_at, finished_at, paused_seconds=0):
+    """Format inspection work time inside the normal weekday work schedule."""
+    if not started_at:
+        return "-"
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(finished_at) if finished_at else datetime.now(timezone.utc)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=TAIPEI_TZ)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=TAIPEI_TZ)
+        start = start.astimezone(TAIPEI_TZ)
+        end = end.astimezone(TAIPEI_TZ)
+        if end <= start:
+            return format_seconds(0)
+
+        total_seconds = 0
+        current_date = start.date()
+        end_date = end.date()
+        while current_date <= end_date:
+            if current_date.weekday() < 5:
+                for window_start, window_end in ((time(8, 0), time(12, 0)), (time(13, 0), time(17, 0))):
+                    work_start = datetime.combine(current_date, window_start, tzinfo=TAIPEI_TZ)
+                    work_end = datetime.combine(current_date, window_end, tzinfo=TAIPEI_TZ)
+                    overlap_start = max(start, work_start)
+                    overlap_end = min(end, work_end)
+                    if overlap_end > overlap_start:
+                        total_seconds += int((overlap_end - overlap_start).total_seconds())
+            current_date += timedelta(days=1)
+
+        total_seconds = max(0, total_seconds - int(round(float(paused_seconds or 0))))
+    except (TypeError, ValueError, OverflowError):
+        return "-"
+    return format_seconds(total_seconds)
+
+
 def format_datetime(value):
     if not value:
         return "-"
@@ -1775,7 +1811,7 @@ def export_xlsx(rows, path):
 
     for row in rows:
         displayed_status = "缺料暫停" if row["material_paused"] else status_label(row["status"])
-        detail.append([excel_value(value) for value in [row["order_no"], row["model_name_snapshot"], axis_type_label(row["axis_type_snapshot"]), row["machine_serial"], row["customer_name"], row["expected_ship_date"] or "", row["worker_name_snapshot"] or "", format_datetime(row["created_at"]), displayed_status, format_date(row["started_at"]), format_time(row["started_at"]), format_date(row["finished_at"]), format_time(row["finished_at"]), format_duration(row["started_at"], row["finished_at"], row["status"]), format_seconds(row["material_pause_seconds"]), format_duration(row["started_at"], row["finished_at"], row["status"], row["material_pause_seconds"]), row["reinspection_reason"]]])
+        detail.append([excel_value(value) for value in [row["order_no"], row["model_name_snapshot"], axis_type_label(row["axis_type_snapshot"]), row["machine_serial"], row["customer_name"], row["expected_ship_date"] or "", row["worker_name_snapshot"] or "", format_datetime(row["created_at"]), displayed_status, format_date(row["started_at"]), format_time(row["started_at"]), format_date(row["finished_at"]), format_time(row["finished_at"]), format_duration(row["started_at"], row["finished_at"], row["status"]), format_seconds(row["material_pause_seconds"]), format_work_duration(row["started_at"], row["finished_at"], row["material_pause_seconds"]), row["reinspection_reason"]]])
     axis_sheet = workbook.create_sheet("軸別統計")
     axis_sheet.append(["軸別", "訂單數", "已完成", "校機中", "缺料暫停", "待校機", "已取消"])
     for cell in axis_sheet[1]:

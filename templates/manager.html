@@ -36,7 +36,7 @@
         <p><strong>結束時間：</strong>{{ format_datetime(detail.finished_at) }}</p>
         <p><strong>總經過時間：</strong>{{ format_duration(detail.started_at, detail.finished_at, detail.status) }}</p>
         <p><strong>缺料時間：</strong>{{ format_seconds(detail.material_pause_seconds) }}</p>
-        <p><strong>實際校機工時：</strong>{{ format_duration(detail.started_at, detail.finished_at, detail.status, detail.material_pause_seconds) }}</p>
+        <p><strong>實際校機工時：</strong>{{ format_work_duration(detail.started_at, detail.finished_at, detail.material_pause_seconds) }}</p>
       </div>
       {% if detail.reinspection_reason %}<p><strong>重新檢驗原因：</strong>{{ detail.reinspection_reason }}</p>{% endif %}
       <a class="button" href="{{ url_for('main.manager', **filters) }}">返回查詢結果</a>
@@ -88,7 +88,7 @@
           <td>{% if row.status == 'started' and row.material_paused %}缺料暫停{% else %}{{ status_label(row.status) }}{% endif %}</td>
           <td>{{ format_datetime(row.started_at) }}</td>
           <td>{{ format_datetime(row.finished_at) }}</td>
-          <td>{{ format_duration(row.started_at, row.finished_at, row.status, row.material_pause_seconds) }}</td>
+          <td>{{ format_work_duration(row.started_at, row.finished_at, row.material_pause_seconds) }}</td>
           <td><a class="button small" href="{{ url_for('main.manager', detail_id=row.id, **filters) }}">查看明細</a></td>
         </tr>
         {% else %}
