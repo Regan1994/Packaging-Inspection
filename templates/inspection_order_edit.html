@@ -24,5 +24,21 @@
     <a class="button" href="{{ url_for('main.reports') }}">返回訂單明細</a>
   </div>
 </section>
+{% if order.status == 'pending' %}
+<section class="panel">
+  <h2>補登開始時間</h2>
+  <p class="muted">若機台已到現場但未能即時掃描 START，可在此補登實際開始校機時間。正常流程仍建議使用員工條碼與 START 條碼。</p>
+  <form method="post" action="{{ url_for('main.order_manual_start', order_id=order.id) }}" class="form-wide">
+    <div class="grid two">
+      <label>校機人員<select name="worker_id" required><option value="">請選擇</option>{% for worker in workers %}<option value="{{ worker.id }}">{{ worker.name }}（{{ worker.employee_no }}）</option>{% endfor %}</select></label>
+      <label>實際開始時間<input type="datetime-local" name="started_at" value="{{ manual_start_default }}" required></label>
+    </div>
+    <label>補登原因<input name="reason" value="現場補登實際開始時間" maxlength="200"></label>
+    <label>補登人員<input name="operator_name" value="admin" maxlength="80"></label>
+    <input type="hidden" name="next" value="{{ edit_next }}">
+    <button class="button primary">補登開始</button>
+  </form>
+</section>
+{% endif %}
 {% if material_pauses %}<section class="panel table-wrap"><h2>缺料紀錄</h2><table><tr><th>缺料時間</th><th>補料時間</th><th>缺料登記人</th><th>補料登記人</th><th>暫停時長</th></tr>{% for pause in material_pauses %}<tr><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未補料' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}</table></section>{% endif %}
 {% endblock %}

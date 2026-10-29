@@ -1682,6 +1682,63 @@ def cancel_order(order_id, cancelled_by="admin"):
     db.commit()
 
 
+def start_order_manually(order_id, worker_id, started_at, reason="", operator_name="admin"):
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    if order["status"] != "pending":
+        raise ValueError("只有待校機訂單可以補登開始時間")
+
+    try:
+        worker_id = int(worker_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("請選擇校機人員") from exc
+    worker = _active_worker(worker_id)
+    if not worker:
+        raise ValueError("校機人員不存在或已停用")
+
+    raw_started_at = (started_at or "").strip()
+    if not raw_started_at:
+        raise ValueError("請輸入實際開始時間")
+    try:
+        parsed = datetime.fromisoformat(raw_started_at)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TAIPEI_TZ)
+        parsed = parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("開始時間格式不正確") from exc
+
+    now = datetime.fromisoformat(utc_now())
+    if parsed > now:
+        raise ValueError("開始時間不能晚於現在")
+    started_at_utc = parsed.isoformat(timespec="seconds")
+    reason = (reason or "").strip() or "現場補登實際開始時間"
+    updated = db.execute(
+        """
+        UPDATE inspection_order
+        SET status='started',worker_id=?,worker_no_snapshot=?,worker_name_snapshot=?,started_at=?,updated_at=?
+        WHERE id=? AND status='pending'
+        """,
+        (worker["id"], worker["employee_no"], worker["name"], started_at_utc, utc_now(), order_id),
+    ).rowcount
+    if not updated:
+        raise ValueError("訂單狀態已變更，請重新開啟訂單")
+    _inspection_audit(
+        "manual_start",
+        "inspection_order",
+        order_id,
+        {
+            "order_no": order["order_no"],
+            "employee_no": worker["employee_no"],
+            "started_at": started_at_utc,
+            "reason": reason,
+        },
+        operator_name,
+    )
+    db.commit()
+
+
 def delete_order(order_id, expected_order_no, confirmation, backup_dir, operator_name="admin"):
     if confirmation != "刪除":
         raise ValueError("請輸入「刪除」確認")

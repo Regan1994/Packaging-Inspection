@@ -367,11 +367,13 @@ from .services import (
     query_report,
     restore_database,
     scan,
+    start_order_manually,
     set_access_password_enabled,
     set_inspection_worker_active,
     status_label,
     summarize_report_by_axis,
     summarize_report_by_worker,
+    TAIPEI_TZ,
     delete_inspection_worker,
     update_inspection_worker,
     update_model,
@@ -382,7 +384,7 @@ bp = Blueprint("main", __name__)
 PROTECTED_ENDPOINTS = {
     "main.models", "main.model_update", "main.model_delete", "main.inspection_workers",
     "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
-    "main.order_edit", "main.order_print", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
+    "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
 }
@@ -553,10 +555,28 @@ def order_edit(order_id):
         "inspection_order_edit.html",
         order=order,
         material_pauses=list_material_pauses(order_id),
+        workers=list_inspection_workers(active_only=True),
+        manual_start_default=datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M"),
         delete_token=token,
         delete_next=url_for("main.reports"),
         edit_next=url_for("main.order_edit", order_id=order_id),
     )
+
+
+@bp.post("/orders/<int:order_id>/manual-start")
+def order_manual_start(order_id):
+    try:
+        start_order_manually(
+            order_id,
+            request.form.get("worker_id"),
+            request.form.get("started_at"),
+            request.form.get("reason"),
+            request.form.get("operator_name", "admin"),
+        )
+        flash("已補登訂單實際開始時間", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(safe_next_path(request.form.get("next")))
 
 
 @bp.get("/orders/<int:order_id>/print")

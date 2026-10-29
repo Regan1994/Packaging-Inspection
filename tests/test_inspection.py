@@ -81,6 +81,40 @@ def test_order_form_can_reuse_existing_model(client, app):
         assert order["model_id"] == get_db().execute("SELECT id FROM inspection_model_master WHERE model_name=?", ("HR-255",)).fetchone()["id"]
 
 
+def test_manual_start_backdates_order_and_allows_finish(client, app):
+    _, worker_a, _, order_a, _ = setup_data(app)
+
+    page = client.get(f"/orders/{order_a}/edit").get_data(as_text=True)
+    assert "補登開始時間" in page
+
+    response = client.post(
+        f"/orders/{order_a}/manual-start",
+        data={
+            "worker_id": str(worker_a),
+            "started_at": "2026-10-29T08:00",
+            "reason": "機台先到現場",
+            "operator_name": "admin",
+            "next": f"/orders/{order_a}/edit",
+        },
+    )
+    assert response.status_code == 302
+    assert response.location.endswith(f"/orders/{order_a}/edit")
+    with app.app_context():
+        order = get_order(order_a)
+        assert order["status"] == "started"
+        assert order["worker_id"] == worker_a
+        assert order["started_at"] == "2026-10-29T00:00:00+00:00"
+        audit = get_db().execute("SELECT action,details FROM inspection_audit_log WHERE entity_id=? AND action='manual_start' LIMIT 1", (str(order_a),)).fetchone()
+        assert audit["action"] == "manual_start"
+        assert "機台先到現場" in audit["details"]
+
+        employee_payload = worker_barcode(worker_a)
+        finish_payload = payload_for(order_a, "FINISH")
+    client.post("/api/scan", json={"payload": employee_payload})
+    finish = client.post("/api/scan", json={"payload": finish_payload})
+    assert finish.json["result"] == "success"
+
+
 def test_report_drops_date_filters_and_can_delete_pending_order(client, app):
     _, _, _, order_a, _ = setup_data(app)
     report = client.get("/reports")
@@ -250,11 +284,11 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
 
     page = client.get("/scan").get_data(as_text=True)
     assert "請先掃描員工條碼" in page
-    assert "V404.10.28" not in page
+    assert "V405.10.29" not in page
     assert "掃描操作說明" in page
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V404.10.28</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V405.10.29</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
