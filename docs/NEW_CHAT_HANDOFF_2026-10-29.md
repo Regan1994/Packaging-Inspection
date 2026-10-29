@@ -24,9 +24,10 @@ C:\TJR\InspectionReporting
 
 - 系統：Flask + SQLite 的區域網路校機報工主系統。
 - 目前開發分支：`codex/material-shortage-pause`。
-- 工作目錄目前有 V405 修改，尚未 commit／push。
+- 工作目錄目前有 V406 修改，尚未 commit／push。
 - 之前已推送的基準提交：`0372318 Add report pagination and scheduled work time`。
-- 目前版本：`V405.10.29`。
+- 目前版本：`V406.10.29`。
+- V406 尚未重新打包；目前 `dist\InspectionReporting` 仍是上一版發布包。
 - 最新測試：`27 passed, 1 skipped`。
 - 最新打包輸出：`C:\Users\TJR_\Documents\ChatGPT\校機報工\dist\InspectionReporting`。
 - 執行檔：`C:\Users\TJR_\Documents\ChatGPT\校機報工\dist\InspectionReporting\InspectionReporting.exe`。
@@ -41,7 +42,7 @@ git log -3 --oneline --decorate
 
 不要任意還原、刪除或覆蓋使用者既有變更。
 
-## V405.10.29 本次修改
+## V405.10.29 本次修改（前一版）
 
 使用情境：機台已到現場可以開始校驗，但正式訂單流程尚未完成，現場無法掃 START。
 
@@ -68,14 +69,30 @@ git log -3 --oneline --decorate
 app/routes.py
 app/services.py
 config.py
+static/app.css
+templates/inspection_models.html
+templates/inspection_scan.html
 templates/inspection_order_edit.html
 tests/test_inspection.py
 docs/inspection-current-status.md
 docs/version-history.md
 docs/versioning.md
+docs/user-guide.md
 docs/NEW_CHAT_HANDOFF_2026-10-28.md
 docs/NEW_CHAT_HANDOFF_2026-10-29.md
 ```
+
+## V406.10.29 本次修改
+
+本次依現場回饋調整掃描頁與機型主檔操作介面：
+
+- 掃描頁上方區塊加寬，與下方「掃描操作說明」對齊。
+- 條碼輸入與送出掃描區佔約 2/3，右側約 1/3 放置列印入口，降低誤觸掃描流程的機會。
+- 列印入口文字統一為「列印缺料/補料條碼」。
+- 機型主檔操作欄加寬，長機型名稱輸入框固定約 280px，保存與刪除按鍵靠右排列。
+- 首頁版本顯示更新為 `V406.10.29`。
+
+驗證結果：`27 passed, 1 skipped`；V406 尚未重新打包。
 
 ## 已完成的相關功能
 
@@ -163,7 +180,7 @@ python app.py
 請先完整閱讀：
 docs/NEW_CHAT_HANDOFF_2026-10-29.md
 
-目前版本是 V405.10.29。這次新增了訂單編輯頁的「補登開始時間」功能，讓現場可在訂單流程尚未到達前，手動輸入實際開始時間、人員與原因，之後再掃 FINISH。
+目前版本是 V406.10.29。除了 V405 的「補登開始時間」功能外，V406 也調整了掃描頁版面、列印缺料/補料條碼文字，以及機型主檔長機型名稱輸入框。
 
-目前 V405 修改尚未 commit／push。請先檢查 git status、現有程式碼與測試，再依我接下來回報的問題處理；不要自行覆蓋正式 instance 資料。
+目前 V406 修改尚未 commit／push，也尚未重新打包。請先檢查 git status、現有程式碼與測試，再依我接下來回報的問題處理；不要自行覆蓋正式 instance 資料。
 ```

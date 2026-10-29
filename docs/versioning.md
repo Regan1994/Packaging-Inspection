@@ -19,4 +19,4 @@ V主版本＋兩位次版本.MM.DD
 下一個新分支：V501.11.02
 ```
 
-目前 `codex/material-shortage-pause` 分支版本：`V405.10.29`。
+目前 `codex/material-shortage-pause` 分支版本：`V406.10.29`。

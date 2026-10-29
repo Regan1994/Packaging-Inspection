@@ -284,11 +284,12 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
 
     page = client.get("/scan").get_data(as_text=True)
     assert "請先掃描員工條碼" in page
-    assert "V405.10.29" not in page
+    assert "V406.10.29" not in page
     assert "掃描操作說明" in page
+    assert "列印缺料/補料條碼" in page
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V405.10.29</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V406.10.29</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
