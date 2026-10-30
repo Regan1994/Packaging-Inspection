@@ -62,6 +62,8 @@ def test_orders_allow_duplicate_machine_serial_but_not_order_number(app):
 
 
 def test_order_form_accepts_typed_model_and_records_model_master(client, app):
+    order_form = client.get("/orders/new").get_data(as_text=True)
+    assert 'id="inspection-order-form"' in order_form
     response = client.post("/orders/new", data={"order_no": "FORM-001", "model_name": "現場輸入機型", "machine_serial": "M-001"})
     assert response.status_code == 302
     with app.app_context():

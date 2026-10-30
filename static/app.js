@@ -10,6 +10,14 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+  const orderForm = document.getElementById('inspection-order-form');
+  if (orderForm) {
+    orderForm.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.target.matches('input, select')) {
+        event.preventDefault();
+      }
+    });
+  }
   const mode = document.getElementById('create_mode');
   const range = document.getElementById('range-fields');
   const single = document.getElementById('single-field');
