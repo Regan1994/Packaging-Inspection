@@ -1830,7 +1830,8 @@ def cancel_order(order_id, cancelled_by="admin"):
     db.commit()
 
 
-def start_order_manually(order_id, worker_id, started_at, reason="", operator_name="admin"):
+def start_order_manually(order_id, worker_id, started_at, reason, operator_name, password, backup_dir):
+    reason, operator_name = _require_admin_correction(password, reason, operator_name)
     db = get_db()
     order = get_order(order_id)
     if not order:
@@ -1861,30 +1862,340 @@ def start_order_manually(order_id, worker_id, started_at, reason="", operator_na
     if parsed > now:
         raise ValueError("開始時間不能晚於現在")
     started_at_utc = parsed.isoformat(timespec="seconds")
-    reason = (reason or "").strip() or "現場補登實際開始時間"
-    updated = db.execute(
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        updated = db.execute(
+            """
+            UPDATE inspection_order
+            SET status='started',worker_id=?,worker_no_snapshot=?,worker_name_snapshot=?,started_at=?,updated_at=?
+            WHERE id=? AND status='pending'
+            """,
+            (worker["id"], worker["employee_no"], worker["name"], started_at_utc, utc_now(), order_id),
+        ).rowcount
+        if not updated:
+            raise ValueError("訂單狀態已變更，請重新開啟訂單")
+        _inspection_audit(
+            "manual_start",
+            "inspection_order",
+            order_id,
+            {
+                "order_no": order["order_no"],
+                "old": {"status": order["status"], "worker_id": order["worker_id"], "started_at": order["started_at"]},
+                "new": {"status": "started", "worker_id": worker["id"], "employee_no": worker["employee_no"], "started_at": started_at_utc},
+                "reason": reason,
+                "backup": str(backup),
+            },
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
+def _parse_admin_datetime(value, label, allow_blank=False):
+    raw = (value or "").strip()
+    if not raw and allow_blank:
+        return None
+    if not raw:
+        raise ValueError(f"請輸入{label}")
+    try:
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TAIPEI_TZ)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}格式不正確") from exc
+
+
+def _require_admin_correction(password, reason, operator_name):
+    if not verify_access_password(password):
+        raise ValueError("管理密碼錯誤")
+    reason = (reason or "").strip()
+    operator_name = (operator_name or "").strip()
+    if not reason:
+        raise ValueError("請輸入修改原因")
+    if not operator_name:
+        raise ValueError("請輸入修改人")
+    return reason, operator_name
+
+
+def _pause_table(pause_type):
+    tables = {
+        "material": "inspection_material_pause",
+        "manual": "inspection_manual_pause",
+    }
+    try:
+        return tables[pause_type]
+    except KeyError as exc:
+        raise ValueError("不支援的暫停類型") from exc
+
+
+def _validate_pause_interval(db, order, paused_at, resumed_at, exclude_table=None, exclude_id=None):
+    if not order["started_at"]:
+        raise ValueError("訂單尚未開始，不能補登暫停紀錄")
+    order_started = datetime.fromisoformat(order["started_at"])
+    order_finished = datetime.fromisoformat(order["finished_at"]) if order["finished_at"] else None
+    if paused_at < order_started:
+        raise ValueError("暫停時間不能早於 START 時間")
+    if resumed_at and resumed_at < paused_at:
+        raise ValueError("恢復時間不能早於暫停時間")
+    if order_finished:
+        if resumed_at is None:
+            raise ValueError("已完成訂單的暫停紀錄必須填寫恢復時間")
+        if resumed_at > order_finished:
+            raise ValueError("恢復時間不能晚於 FINISH 時間")
+    else:
+        now = datetime.fromisoformat(utc_now())
+        if paused_at > now or (resumed_at and resumed_at > now):
+            raise ValueError("暫停或恢復時間不能晚於現在")
+
+    candidate_end = resumed_at or datetime.max.replace(tzinfo=timezone.utc)
+    for table in ("inspection_material_pause", "inspection_manual_pause"):
+        rows = db.execute(f"SELECT id,paused_at,resumed_at FROM {table} WHERE order_id=?", (order["id"],)).fetchall()
+        for row in rows:
+            if table == exclude_table and row["id"] == exclude_id:
+                continue
+            existing_start = datetime.fromisoformat(row["paused_at"])
+            existing_end = datetime.fromisoformat(row["resumed_at"]) if row["resumed_at"] else datetime.max.replace(tzinfo=timezone.utc)
+            if paused_at < existing_end and existing_start < candidate_end:
+                raise ValueError("暫停區間不可與既有缺料或人工暫停重疊")
+
+
+def correct_order_timeline(order_id, worker_id, started_at, finished_at, reason, operator_name, password, backup_dir):
+    reason, operator_name = _require_admin_correction(password, reason, operator_name)
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    if order["status"] == "cancelled":
+        raise ValueError("已取消訂單不能修正報工時間")
+    try:
+        worker_id = int(worker_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("請選擇校機人員") from exc
+    worker = get_inspection_worker(worker_id)
+    if not worker:
+        raise ValueError("找不到校機人員")
+
+    start = _parse_admin_datetime(started_at, "START 時間")
+    finish = _parse_admin_datetime(finished_at, "FINISH 時間", allow_blank=True)
+    now = datetime.fromisoformat(utc_now())
+    if start > now:
+        raise ValueError("START 時間不能晚於現在")
+    if finish and finish > now:
+        raise ValueError("FINISH 時間不能晚於現在")
+    if finish and finish < start:
+        raise ValueError("FINISH 時間不能早於 START 時間")
+
+    pauses = []
+    for table in ("inspection_material_pause", "inspection_manual_pause"):
+        pauses.extend(db.execute(f"SELECT paused_at,resumed_at FROM {table} WHERE order_id=?", (order_id,)).fetchall())
+    for pause in pauses:
+        pause_start = datetime.fromisoformat(pause["paused_at"])
+        pause_end = datetime.fromisoformat(pause["resumed_at"]) if pause["resumed_at"] else None
+        if pause_start < start:
+            raise ValueError("START 時間不能晚於既有暫停時間")
+        if finish and (pause_end is None or pause_end > finish):
+            raise ValueError("FINISH 前必須完成所有暫停，且 FINISH 不可早於恢復時間")
+
+    old_values = {
+        "worker_id": order["worker_id"],
+        "employee_no": order["worker_no_snapshot"],
+        "worker_name": order["worker_name_snapshot"],
+        "started_at": order["started_at"],
+        "finished_at": order["finished_at"],
+        "status": order["status"],
+    }
+    new_values = {
+        "worker_id": worker["id"],
+        "employee_no": worker["employee_no"],
+        "worker_name": worker["name"],
+        "started_at": start.isoformat(timespec="seconds"),
+        "finished_at": finish.isoformat(timespec="seconds") if finish else None,
+        "status": "completed" if finish else "started",
+    }
+    if old_values == new_values:
+        raise ValueError("修正內容與目前資料相同")
+
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute(
+            "SELECT worker_id,worker_no_snapshot AS employee_no,worker_name_snapshot AS worker_name,started_at,finished_at,status FROM inspection_order WHERE id=?",
+            (order_id,),
+        ).fetchone()
+        if not current or dict(current) != old_values:
+            raise ValueError("訂單資料已被其他操作更新，請重新開啟後再修正")
+        current_pauses = []
+        for table in ("inspection_material_pause", "inspection_manual_pause"):
+            current_pauses.extend(db.execute(f"SELECT paused_at,resumed_at FROM {table} WHERE order_id=?", (order_id,)).fetchall())
+        for pause in current_pauses:
+            pause_start = datetime.fromisoformat(pause["paused_at"])
+            pause_end = datetime.fromisoformat(pause["resumed_at"]) if pause["resumed_at"] else None
+            if pause_start < start:
+                raise ValueError("START 時間不能晚於既有暫停時間")
+            if finish and (pause_end is None or pause_end > finish):
+                raise ValueError("FINISH 前必須完成所有暫停，且 FINISH 不可早於恢復時間")
+        db.execute(
+            """
+            UPDATE inspection_order
+            SET worker_id=?,worker_no_snapshot=?,worker_name_snapshot=?,started_at=?,finished_at=?,status=?,updated_at=?
+            WHERE id=?
+            """,
+            (
+                new_values["worker_id"],
+                new_values["employee_no"],
+                new_values["worker_name"],
+                new_values["started_at"],
+                new_values["finished_at"],
+                new_values["status"],
+                utc_now(),
+                order_id,
+            ),
+        )
+        _inspection_audit(
+            "admin_correct_order",
+            "inspection_order",
+            order_id,
+            {"order_no": order["order_no"], "old": old_values, "new": new_values, "reason": reason, "backup": str(backup)},
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
+def correct_pause_record(order_id, pause_type, pause_id, paused_at, resumed_at, reason, operator_name, password, backup_dir):
+    reason, operator_name = _require_admin_correction(password, reason, operator_name)
+    table = _pause_table(pause_type)
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    if order["status"] == "cancelled":
+        raise ValueError("已取消訂單不能修正暫停紀錄")
+    try:
+        pause_id = int(pause_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("暫停紀錄編號不正確") from exc
+    pause = db.execute(f"SELECT * FROM {table} WHERE id=? AND order_id=?", (pause_id, order_id)).fetchone()
+    if not pause:
+        raise ValueError("找不到暫停紀錄")
+    start = _parse_admin_datetime(paused_at, "暫停時間")
+    finish = _parse_admin_datetime(resumed_at, "恢復時間", allow_blank=True)
+    _validate_pause_interval(db, order, start, finish, exclude_table=table, exclude_id=pause_id)
+    old_values = {"paused_at": pause["paused_at"], "resumed_at": pause["resumed_at"]}
+    new_values = {
+        "paused_at": start.isoformat(timespec="seconds"),
+        "resumed_at": finish.isoformat(timespec="seconds") if finish else None,
+    }
+    if old_values == new_values:
+        raise ValueError("修正內容與目前資料相同")
+
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current_order = get_order(order_id)
+        current_pause = db.execute(f"SELECT * FROM {table} WHERE id=? AND order_id=?", (pause_id, order_id)).fetchone()
+        if not current_order or not current_pause or {"paused_at": current_pause["paused_at"], "resumed_at": current_pause["resumed_at"]} != old_values:
+            raise ValueError("暫停紀錄已被其他操作更新，請重新開啟後再修正")
+        _validate_pause_interval(db, current_order, start, finish, exclude_table=table, exclude_id=pause_id)
+        db.execute(f"UPDATE {table} SET paused_at=?,resumed_at=? WHERE id=? AND order_id=?", (new_values["paused_at"], new_values["resumed_at"], pause_id, order_id))
+        _inspection_audit(
+            "admin_correct_pause",
+            "inspection_order",
+            order_id,
+            {"order_id": order_id, "order_no": order["order_no"], "pause_type": pause_type, "pause_record_id": pause_id, "old": old_values, "new": new_values, "reason": reason, "backup": str(backup)},
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
+def add_pause_record(order_id, pause_type, paused_at, resumed_at, reason, operator_name, password, backup_dir):
+    reason, operator_name = _require_admin_correction(password, reason, operator_name)
+    table = _pause_table(pause_type)
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    if order["status"] == "cancelled":
+        raise ValueError("已取消訂單不能補登暫停紀錄")
+    if not order["worker_id"]:
+        raise ValueError("訂單尚未指定校機人員")
+    start = _parse_admin_datetime(paused_at, "暫停時間")
+    finish = _parse_admin_datetime(resumed_at, "恢復時間", allow_blank=True)
+    _validate_pause_interval(db, order, start, finish)
+    worker = get_inspection_worker(order["worker_id"])
+    if not worker:
+        raise ValueError("找不到訂單校機人員")
+
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current_order = get_order(order_id)
+        if not current_order or current_order["status"] != order["status"] or current_order["updated_at"] != order["updated_at"]:
+            raise ValueError("訂單資料已被其他操作更新，請重新開啟後再補登")
+        _validate_pause_interval(db, current_order, start, finish)
+        cursor = db.execute(
+            f"""
+            INSERT INTO {table}(
+                order_id,paused_at,resumed_at,
+                paused_by_worker_id,paused_by_employee_no,paused_by_name,
+                resumed_by_worker_id,resumed_by_employee_no,resumed_by_name
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                order_id,
+                start.isoformat(timespec="seconds"),
+                finish.isoformat(timespec="seconds") if finish else None,
+                worker["id"], worker["employee_no"], worker["name"],
+                worker["id"] if finish else None,
+                worker["employee_no"] if finish else None,
+                worker["name"] if finish else None,
+            ),
+        )
+        values = {"paused_at": start.isoformat(timespec="seconds"), "resumed_at": finish.isoformat(timespec="seconds") if finish else None}
+        _inspection_audit(
+            "admin_add_pause",
+            "inspection_order",
+            order_id,
+            {"order_id": order_id, "order_no": order["order_no"], "pause_type": pause_type, "pause_record_id": cursor.lastrowid, "old": None, "new": values, "reason": reason, "backup": str(backup)},
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
+def list_order_corrections(order_id):
+    rows = get_db().execute(
         """
-        UPDATE inspection_order
-        SET status='started',worker_id=?,worker_no_snapshot=?,worker_name_snapshot=?,started_at=?,updated_at=?
-        WHERE id=? AND status='pending'
+        SELECT * FROM inspection_audit_log
+        WHERE (action LIKE 'admin_%' OR action='manual_start') AND entity_type='inspection_order' AND entity_id=?
+        ORDER BY created_at DESC
         """,
-        (worker["id"], worker["employee_no"], worker["name"], started_at_utc, utc_now(), order_id),
-    ).rowcount
-    if not updated:
-        raise ValueError("訂單狀態已變更，請重新開啟訂單")
-    _inspection_audit(
-        "manual_start",
-        "inspection_order",
-        order_id,
-        {
-            "order_no": order["order_no"],
-            "employee_no": worker["employee_no"],
-            "started_at": started_at_utc,
-            "reason": reason,
-        },
-        operator_name,
-    )
-    db.commit()
+        (str(order_id),),
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["details_data"] = json.loads(row["details"] or "{}")
+        except (TypeError, ValueError):
+            item["details_data"] = {}
+        result.append(item)
+    return result
 
 
 def delete_order(order_id, expected_order_no, confirmation, backup_dir, operator_name="admin"):

@@ -342,12 +342,15 @@ def restore():
 # reference.  The registered blueprint below is the final-inspection UI and
 # uses only inspection-prefixed service functions/tables.
 from .services import (
+    add_pause_record,
     access_password_enabled,
     axis_type_label,
     backup_database,
     cancel_order,
     change_access_password,
     clear_debug_data,
+    correct_order_timeline,
+    correct_pause_record,
     create_inspection_worker,
     create_model,
     create_order,
@@ -361,6 +364,7 @@ from .services import (
     get_order,
     list_manual_pauses,
     list_material_pauses,
+    list_order_corrections,
     list_inspection_workers,
     list_models,
     list_report_workers,
@@ -386,7 +390,7 @@ bp = Blueprint("main", __name__)
 PROTECTED_ENDPOINTS = {
     "main.models", "main.model_update", "main.model_delete", "main.inspection_workers",
     "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
-    "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
+    "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_admin_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
     "main.pause_barcodes_print",
@@ -395,6 +399,18 @@ PROTECTED_ENDPOINTS = {
 
 def safe_next_path(value):
     return value if value and value.startswith("/") and not value.startswith("//") else url_for("main.index")
+
+
+def datetime_local_value(value):
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TAIPEI_TZ)
+        return parsed.astimezone(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M")
+    except (TypeError, ValueError):
+        return ""
 
 
 @bp.before_request
@@ -561,6 +577,9 @@ def order_edit(order_id):
         material_pauses=list_material_pauses(order_id),
         manual_pauses=list_manual_pauses(order_id),
         workers=list_inspection_workers(active_only=True),
+        correction_workers=list_inspection_workers(),
+        corrections=list_order_corrections(order_id),
+        datetime_local_value=datetime_local_value,
         manual_start_default=datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M"),
         delete_token=token,
         delete_next=url_for("main.reports"),
@@ -576,12 +595,75 @@ def order_manual_start(order_id):
             request.form.get("worker_id"),
             request.form.get("started_at"),
             request.form.get("reason"),
-            request.form.get("operator_name", "admin"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
         )
         flash("已補登訂單實際開始時間", "success")
-    except ValueError as exc:
+    except (ValueError, OSError, sqlite3.Error) as exc:
         flash(str(exc), "error")
     return redirect(safe_next_path(request.form.get("next")))
+
+
+@bp.post("/orders/<int:order_id>/admin-correct")
+def order_admin_correct(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = correct_order_timeline(
+            order_id,
+            request.form.get("worker_id"),
+            request.form.get("started_at"),
+            request.form.get("finished_at"),
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"訂單報工資料已修正；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有修正訂單：{exc}", "error")
+    return redirect(next_path)
+
+
+@bp.post("/orders/<int:order_id>/pauses/<pause_type>/<int:pause_id>/correct")
+def order_pause_correct(order_id, pause_type, pause_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = correct_pause_record(
+            order_id,
+            pause_type,
+            pause_id,
+            request.form.get("paused_at"),
+            request.form.get("resumed_at"),
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"暫停紀錄已修正；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有修正暫停紀錄：{exc}", "error")
+    return redirect(next_path)
+
+
+@bp.post("/orders/<int:order_id>/pauses/add")
+def order_pause_add(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = add_pause_record(
+            order_id,
+            request.form.get("pause_type"),
+            request.form.get("paused_at"),
+            request.form.get("resumed_at"),
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"暫停紀錄已補登；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有補登暫停紀錄：{exc}", "error")
+    return redirect(next_path)
 
 
 @bp.get("/orders/<int:order_id>/print")

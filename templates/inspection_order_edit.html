@@ -35,11 +35,79 @@
       <label>實際開始時間<input type="datetime-local" name="started_at" value="{{ manual_start_default }}" required></label>
     </div>
     <label>補登原因<input name="reason" value="現場補登實際開始時間" maxlength="200"></label>
-    <label>補登人員<input name="operator_name" value="admin" maxlength="80"></label>
+    <label>補登人員<input name="operator_name" maxlength="80" required></label>
+    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
     <input type="hidden" name="next" value="{{ edit_next }}">
     <button class="button primary">補登開始</button>
   </form>
 </section>
 {% endif %}
-{% if material_pauses or manual_pauses %}<section class="panel table-wrap"><h2>缺料／人工暫停紀錄</h2><table><tr><th>類型</th><th>開始時間</th><th>恢復時間</th><th>登記人</th><th>恢復人</th><th>暫停時長</th></tr>{% for pause in material_pauses %}<tr><td>缺料</td><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未補料' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}{% for pause in manual_pauses %}<tr><td>人工暫停</td><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未恢復' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}</table></section>{% endif %}
+{% if material_pauses or manual_pauses %}
+<section class="panel table-wrap">
+  <h2>缺料／人工暫停紀錄</h2>
+  <table><tr><th>類型</th><th>開始時間</th><th>恢復時間</th><th>登記人</th><th>恢復人</th><th>暫停時長</th></tr>
+    {% for pause in material_pauses %}<tr><td>缺料</td><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未補料' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}
+    {% for pause in manual_pauses %}<tr><td>人工暫停</td><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未恢復' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+{% if order.status != 'cancelled' %}
+<section class="panel">
+  <h2>管理員錯誤修正</h2>
+  <p class="muted">僅用於誤掃或漏掃修正。每次修改都會先備份資料庫，並保留修改前後資料、修改人與原因。管理密碼必須在每次送出時重新輸入。</p>
+  <form method="post" action="{{ url_for('main.order_admin_correct', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定修正此訂單的校機人員或 START／FINISH 時間？');">
+    <div class="grid two">
+      <label>校機人員<select name="worker_id" required><option value="">請選擇</option>{% for worker in correction_workers %}<option value="{{ worker.id }}" {% if worker.id == order.worker_id %}selected{% endif %}>{{ worker.name }}（{{ worker.employee_no }}）{% if not worker.is_active %}［已停用］{% endif %}</option>{% endfor %}</select></label>
+      <label>START 時間<input type="datetime-local" name="started_at" value="{{ datetime_local_value(order.started_at) }}" required></label>
+      <label>FINISH 時間（未完成可留空）<input type="datetime-local" name="finished_at" value="{{ datetime_local_value(order.finished_at) }}"></label>
+      <label>修改人<input name="operator_name" maxlength="80" required></label>
+    </div>
+    <label>修改原因<input name="reason" maxlength="200" required></label>
+    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
+    <input type="hidden" name="next" value="{{ edit_next }}">
+    <button class="button danger">確認修正訂單資料</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>補登缺料／人工暫停</h2>
+  <form method="post" action="{{ url_for('main.order_pause_add', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定新增這段暫停紀錄？');">
+    <div class="grid two">
+      <label>暫停類型<select name="pause_type" required><option value="material">缺料／補料</option><option value="manual">人工暫停／恢復</option></select></label>
+      <label>暫停時間<input type="datetime-local" name="paused_at" required></label>
+      <label>恢復時間（進行中可留空）<input type="datetime-local" name="resumed_at"></label>
+      <label>修改人<input name="operator_name" maxlength="80" required></label>
+    </div>
+    <label>補登原因<input name="reason" maxlength="200" required></label>
+    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
+    <input type="hidden" name="next" value="{{ edit_next }}">
+    <button class="button danger">確認補登暫停紀錄</button>
+  </form>
+</section>
+{% for pause_type, pause_label, pauses in [('material', '缺料／補料', material_pauses), ('manual', '人工暫停／恢復', manual_pauses)] %}
+  {% for pause in pauses %}
+  <section class="panel">
+    <h2>修正{{ pause_label }}紀錄 #{{ pause.id }}</h2>
+    <form method="post" action="{{ url_for('main.order_pause_correct', order_id=order.id, pause_type=pause_type, pause_id=pause.id) }}" class="form-wide" onsubmit="return confirm('確定修正這段暫停紀錄？');">
+      <div class="grid two">
+        <label>暫停時間<input type="datetime-local" name="paused_at" value="{{ datetime_local_value(pause.paused_at) }}" required></label>
+        <label>恢復時間（進行中可留空）<input type="datetime-local" name="resumed_at" value="{{ datetime_local_value(pause.resumed_at) }}"></label>
+        <label>修改人<input name="operator_name" maxlength="80" required></label>
+        <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
+      </div>
+      <label>修改原因<input name="reason" maxlength="200" required></label>
+      <input type="hidden" name="next" value="{{ edit_next }}">
+      <button class="button danger">確認修正暫停紀錄</button>
+    </form>
+  </section>
+  {% endfor %}
+{% endfor %}
+{% endif %}
+{% if corrections %}
+<section class="panel table-wrap">
+  <h2>管理員修正紀錄</h2>
+  <table><tr><th>修改時間</th><th>動作</th><th>修改人</th><th>原因</th><th>修改前備份</th></tr>
+    {% for correction in corrections %}<tr><td>{{ format_datetime(correction.created_at) }}</td><td>{{ {'manual_start':'補登 START','admin_correct_order':'訂單／人員／時間修正','admin_add_pause':'補登暫停','admin_correct_pause':'修正暫停'}.get(correction.action, correction.action) }}</td><td>{{ correction.operator_name }}</td><td>{{ correction.details_data.reason or '-' }}</td><td>{{ correction.details_data.backup or '-' }}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
 {% endblock %}

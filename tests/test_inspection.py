@@ -101,6 +101,7 @@ def test_manual_start_backdates_order_and_allows_finish(client, app):
             "started_at": "2026-10-29T08:00",
             "reason": "機台先到現場",
             "operator_name": "admin",
+            "password": "TJR",
             "next": f"/orders/{order_a}/edit",
         },
     )
@@ -114,6 +115,7 @@ def test_manual_start_backdates_order_and_allows_finish(client, app):
         audit = get_db().execute("SELECT action,details FROM inspection_audit_log WHERE entity_id=? AND action='manual_start' LIMIT 1", (str(order_a),)).fetchone()
         assert audit["action"] == "manual_start"
         assert "機台先到現場" in audit["details"]
+        assert list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
 
         employee_payload = worker_barcode(worker_a)
         finish_payload = payload_for(order_a, "FINISH")
@@ -322,7 +324,7 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
     assert "固定暫停條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V601.11.02</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V602.11.02</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
