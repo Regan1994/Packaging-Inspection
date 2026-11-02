@@ -13,7 +13,7 @@
 <section class="home-status" aria-label="訂單狀態">
   <h2>訂單狀態</h2>
   {% for row in stats %}<a class="stat button" href="{{ url_for('main.reports', status_group=row.filter) }}"><span>{{ row.label }}</span><strong>{{ row.count }}</strong></a>{% endfor %}
-  <section class="home-backup"><h2>資料安全</h2><p>校機資料使用獨立 SQLite 資料庫，可建立驗證過的備份。</p><form method="post" action="{{ url_for('main.backup') }}"><button class="button">立即備份</button></form></section>
+  <section class="home-backup"><h2>資料安全</h2><p>系統每日啟動時自動建立一份經驗證的 SQLite 備份，也可隨時手動備份。</p><form method="post" action="{{ url_for('main.backup') }}"><button class="button">立即備份</button></form></section>
 </section>
 <section class="home-status" aria-label="軸別統計"><h2>軸別統計</h2>{% for row in axis_stats %}<a class="stat button" href="{{ url_for('main.reports', axis_type=row.axis_type) }}"><span>{{ row.label }}</span><strong>{{ row.count }}</strong></a>{% endfor %}</section>
 </aside>

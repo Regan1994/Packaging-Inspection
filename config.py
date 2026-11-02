@@ -14,11 +14,13 @@ BACKUP_DIR = INSTANCE_DIR / "backups"
 
 
 class Config:
-    APP_VERSION = "V501.11.02"
+    APP_VERSION = "V601.11.02"
     SECRET_KEY = os.environ.get("INSPECTION_SECRET_KEY", "inspection-local-development-key")
     INITIAL_ACCESS_PASSWORD = "TJR"
     DATABASE = str(DATABASE_PATH)
     BACKUP_DIRECTORY = str(BACKUP_DIR)
+    AUTO_BACKUP_ENABLED = True
+    AUTO_BACKUP_RETENTION = 30
     # Bind on the local network so the printer and scanner PCs can use one database.
     HOST = os.environ.get("INSPECTION_HOST", "0.0.0.0")
     BROWSER_HOST = os.environ.get("INSPECTION_BROWSER_HOST", "127.0.0.1")

@@ -5,6 +5,7 @@ from logging.handlers import RotatingFileHandler
 from flask import Flask
 
 from config import Config
+from .automatic_backup import run_daily_auto_backup
 from .db import close_db, init_db
 from .services import format_date, format_datetime, format_duration, format_seconds, format_time, format_work_duration, status_label
 
@@ -28,6 +29,17 @@ def create_app(test_config=None):
 
     with app.app_context():
         init_db()
+        if app.config["AUTO_BACKUP_ENABLED"]:
+            try:
+                backup_path, created = run_daily_auto_backup(
+                    app.config["DATABASE"],
+                    app.config["BACKUP_DIRECTORY"],
+                    retention=app.config["AUTO_BACKUP_RETENTION"],
+                )
+                if created:
+                    app.logger.info("automatic database backup created: %s", backup_path)
+            except Exception:
+                app.logger.exception("automatic database backup failed; application startup will continue")
 
     from .routes import bp
     app.register_blueprint(bp)

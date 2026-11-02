@@ -4,13 +4,13 @@
 
 ## 說明
 
-本文件整理校機報工系統從尚未使用正式版號，到目前 `V501.11.02` 的功能變更。
+本文件整理校機報工系統從尚未使用正式版號，到目前 `V601.11.02` 的功能變更。
 
 早期版本沒有正式版號，因此以開發日期、Git commit 與既有開發紀錄整理。`V401`～`V403` 的內容主要依目前交接文件與版本紀錄整理，版號不一定與單一 Git commit 一對一對應。
 
-目前版本：`V501.11.02`
+目前版本：`V601.11.02`
 
-目前分支：`codex/manual-pause-v501-11-02`
+目前分支：`codex/v601.11.02`
 
 ## 版本編號規則
 
@@ -167,6 +167,29 @@ C:\Users\TJR_\Documents\ChatGPT\校機報工\dist\InspectionReporting
 ```
 
 本版尚未重新建立 PyInstaller 發布包；重新打包前仍須保留現場正式 `instance` 資料庫。
+
+### V601.11.02
+
+大改版開發基線與啟動安全性：
+
+- 從 `codex/manual-pause-v501-11-02` 建立並保留原分支。
+- 新開發分支為 `codex/v601.11.02`。
+- 首頁顯示版次更新為 `V601.11.02`。
+- Windows 主機使用全域命名 Mutex，避免同時執行兩套主系統。
+- 第二次啟動不會建立 Flask 或開啟 SQLite，而會開啟既有系統網址並顯示提示。
+- Mutex 由作業系統在程序結束時釋放，不使用可能殘留的 lock file。
+- 啟動後依台北日期每日建立一份自動備份，使用 SQLite backup API 並執行 `integrity_check`。
+- 自動備份只保留最近 30 份，只輪替 `inspection_auto_*.db`；手動 `inspection_backup_*.db` 永久保留，除非人工刪除。
+- 自動備份失敗只寫入 log，不阻止主系統啟動。
+- 本階段未變更資料庫 schema 或正式 `instance`。
+
+驗證結果：
+
+```text
+43 passed, 1 skipped
+```
+
+本版尚未重新建立 PyInstaller 發布包。
 
 ### V406.10.29
 

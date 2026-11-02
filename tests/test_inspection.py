@@ -322,7 +322,7 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
     assert "固定暫停條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V501.11.02</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V601.11.02</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
