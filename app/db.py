@@ -234,6 +234,18 @@ CREATE TABLE IF NOT EXISTS inspection_material_pause (
     resumed_by_employee_no TEXT,
     resumed_by_name TEXT
 );
+CREATE TABLE IF NOT EXISTS inspection_manual_pause (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES inspection_order(id),
+    paused_at TEXT NOT NULL,
+    resumed_at TEXT,
+    paused_by_worker_id INTEGER REFERENCES inspection_worker(id),
+    paused_by_employee_no TEXT,
+    paused_by_name TEXT,
+    resumed_by_worker_id INTEGER REFERENCES inspection_worker(id),
+    resumed_by_employee_no TEXT,
+    resumed_by_name TEXT
+);
 CREATE TABLE IF NOT EXISTS inspection_audit_log (
     log_id TEXT PRIMARY KEY,
     action TEXT NOT NULL,
@@ -249,6 +261,8 @@ CREATE INDEX IF NOT EXISTS idx_inspection_order_machine_serial ON inspection_ord
 CREATE INDEX IF NOT EXISTS idx_inspection_scan_event_time ON inspection_scan_event(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_inspection_material_pause_order ON inspection_material_pause(order_id, paused_at);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_inspection_material_pause_open ON inspection_material_pause(order_id) WHERE resumed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_inspection_manual_pause_order ON inspection_manual_pause(order_id, paused_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_inspection_manual_pause_open ON inspection_manual_pause(order_id) WHERE resumed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_inspection_audit_log_time ON inspection_audit_log(created_at);
 """
 
@@ -284,6 +298,9 @@ def migrate_inspection_schema(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_inspection_material_pause_order ON inspection_material_pause(order_id, paused_at)")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_inspection_material_pause_open ON inspection_material_pause(order_id) WHERE resumed_at IS NULL")
     db.execute("INSERT OR IGNORE INTO inspection_schema_migrations(version, applied_at) VALUES (?, ?)", (3, utc_now()))
+    db.execute("CREATE INDEX IF NOT EXISTS idx_inspection_manual_pause_order ON inspection_manual_pause(order_id, paused_at)")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_inspection_manual_pause_open ON inspection_manual_pause(order_id) WHERE resumed_at IS NULL")
+    db.execute("INSERT OR IGNORE INTO inspection_schema_migrations(version, applied_at) VALUES (?, ?)", (4, utc_now()))
 
     db.executescript(SCHEMA)
     needs_batch_mode_migration = db.execute("SELECT 1 FROM schema_migrations WHERE version=2").fetchone() is None

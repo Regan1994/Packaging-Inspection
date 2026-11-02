@@ -14,7 +14,7 @@ BACKUP_DIR = INSTANCE_DIR / "backups"
 
 
 class Config:
-    APP_VERSION = "V406.10.29"
+    APP_VERSION = "V501.11.02"
     SECRET_KEY = os.environ.get("INSPECTION_SECRET_KEY", "inspection-local-development-key")
     INITIAL_ACCESS_PASSWORD = "TJR"
     DATABASE = str(DATABASE_PATH)

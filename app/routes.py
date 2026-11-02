@@ -359,11 +359,13 @@ from .services import (
     export_xlsx,
     get_inspection_worker,
     get_order,
+    list_manual_pauses,
     list_material_pauses,
     list_inspection_workers,
     list_models,
     list_report_workers,
     material_action_barcodes,
+    pause_action_barcodes,
     query_report,
     restore_database,
     scan,
@@ -387,6 +389,7 @@ PROTECTED_ENDPOINTS = {
     "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
+    "main.pause_barcodes_print",
 }
 
 
@@ -407,15 +410,16 @@ def _home_stats():
         """
         SELECT
             SUM(o.status='pending') pending,
-            SUM(o.status='started' AND NOT EXISTS(SELECT 1 FROM inspection_material_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL)) started,
+            SUM(o.status='started' AND NOT EXISTS(SELECT 1 FROM inspection_material_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM inspection_manual_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL)) started,
             SUM(o.status='started' AND EXISTS(SELECT 1 FROM inspection_material_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL)) material_paused,
+            SUM(o.status='started' AND EXISTS(SELECT 1 FROM inspection_manual_pause p WHERE p.order_id=o.id AND p.resumed_at IS NULL)) manual_paused,
             SUM(o.status='completed') completed,
             SUM(o.status='cancelled') cancelled
         FROM inspection_order o
         """
     ).fetchone()
-    labels = {"pending": "待校機", "started": "校機中", "material_paused": "缺料暫停", "completed": "已完成", "cancelled": "已取消"}
-    return [{"label": labels[key], "count": row[key] or 0, "filter": key} for key in ("pending", "started", "material_paused", "completed", "cancelled")]
+    labels = {"pending": "待校機", "started": "校機中", "material_paused": "缺料暫停", "manual_paused": "人工暫停", "completed": "已完成", "cancelled": "已取消"}
+    return [{"label": labels[key], "count": row[key] or 0, "filter": key} for key in ("pending", "started", "material_paused", "manual_paused", "completed", "cancelled")]
 
 
 def _home_axis_stats():
@@ -555,6 +559,7 @@ def order_edit(order_id):
         "inspection_order_edit.html",
         order=order,
         material_pauses=list_material_pauses(order_id),
+        manual_pauses=list_manual_pauses(order_id),
         workers=list_inspection_workers(active_only=True),
         manual_start_default=datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M"),
         delete_token=token,
@@ -598,6 +603,15 @@ def material_barcodes_print():
     )
 
 
+@bp.get("/pause-barcodes/print")
+def pause_barcodes_print():
+    return render_template(
+        "inspection_print_pause_action.html",
+        records=pause_action_barcodes(),
+        code128_svg=code128_svg,
+    )
+
+
 @bp.post("/orders/<int:order_id>/cancel")
 def order_cancel(order_id):
     try:
@@ -628,7 +642,8 @@ def order_delete(order_id):
 def scan_reset():
     session.pop("scan_worker_id", None)
     session.pop("scan_material_action", None)
-    flash("已清除目前員工與待處理的缺料／補料操作", "success")
+    session.pop("scan_pause_action", None)
+    flash("已清除目前員工與待處理的缺料／補料／暫停操作", "success")
     return redirect(url_for("main.scan_page"))
 
 
@@ -637,19 +652,25 @@ def scan_page():
     result = None
     if request.method == "POST":
         payload = request.form.get("payload", "")
-        result = scan(payload, session.get("scan_worker_id"), pending_material_action=session.get("scan_material_action"))
+        result = scan(payload, session.get("scan_worker_id"), pending_material_action=session.get("scan_material_action"), pending_pause_action=session.get("scan_pause_action"))
         result["payload"] = payload
         if result.get("scan_kind") == "employee" and result.get("worker_id"):
             session["scan_worker_id"] = result["worker_id"]
             session.pop("scan_material_action", None)
+            session.pop("scan_pause_action", None)
         elif result.get("scan_kind") == "material_action" and result.get("material_action"):
             session["scan_material_action"] = result["material_action"]
+            session.pop("scan_pause_action", None)
+        elif result.get("scan_kind") == "pause_action" and result.get("pause_action"):
+            session["scan_pause_action"] = result["pause_action"]
+            session.pop("scan_material_action", None)
         elif result.get("scan_kind") == "order":
             session.pop("scan_worker_id", None)
             session.pop("scan_material_action", None)
+            session.pop("scan_pause_action", None)
     current_worker = get_inspection_worker(session["scan_worker_id"]) if session.get("scan_worker_id") else None
-    pending_action = session.get("scan_material_action")
-    pending_action_label = {"SHORTAGE": "缺料", "REPLENISH": "補料"}.get(pending_action)
+    pending_action = session.get("scan_material_action") or session.get("scan_pause_action")
+    pending_action_label = {"SHORTAGE": "缺料", "REPLENISH": "補料", "PAUSE": "暫停"}.get(pending_action)
     return render_template("inspection_scan.html", result=result, current_worker=current_worker, pending_action_label=pending_action_label)
 
 
@@ -659,15 +680,22 @@ def api_scan():
         request.json.get("payload", "") if request.is_json else request.form.get("payload", ""),
         session.get("scan_worker_id"),
         pending_material_action=session.get("scan_material_action"),
+        pending_pause_action=session.get("scan_pause_action"),
     )
     if result.get("scan_kind") == "employee" and result.get("worker_id"):
         session["scan_worker_id"] = result["worker_id"]
         session.pop("scan_material_action", None)
+        session.pop("scan_pause_action", None)
     elif result.get("scan_kind") == "material_action" and result.get("material_action"):
         session["scan_material_action"] = result["material_action"]
+        session.pop("scan_pause_action", None)
+    elif result.get("scan_kind") == "pause_action" and result.get("pause_action"):
+        session["scan_pause_action"] = result["pause_action"]
+        session.pop("scan_material_action", None)
     elif result.get("scan_kind") == "order":
         session.pop("scan_worker_id", None)
         session.pop("scan_material_action", None)
+        session.pop("scan_pause_action", None)
     return jsonify(result), 200 if result["result"] in {"success", "duplicate"} else 400
 
 
@@ -720,10 +748,12 @@ def manager():
     detail_id = (filters.pop("detail_id", "") or "").strip()
     detail = None
     material_pauses = []
+    manual_pauses = []
     if detail_id.isdigit():
         detail = get_order(int(detail_id))
         if detail:
             material_pauses = list_material_pauses(detail["id"])
+            manual_pauses = list_manual_pauses(detail["id"])
 
     rows = query_report(filters)
     return render_template(
@@ -733,6 +763,7 @@ def manager():
         workers=list_report_workers(),
         detail=detail,
         material_pauses=material_pauses,
+        manual_pauses=manual_pauses,
     )
 
 

@@ -15,6 +15,7 @@ from app.services import (
     get_inspection_worker,
     make_material_action_payload,
     make_order_payload,
+    make_pause_action_payload,
     query_report,
     scan,
     set_inspection_worker_active,
@@ -46,6 +47,10 @@ def worker_barcode(worker_id):
 
 def material_barcode(action):
     return make_material_action_payload(action)
+
+
+def pause_barcode():
+    return make_pause_action_payload()
 
 
 def test_orders_allow_duplicate_machine_serial_but_not_order_number(app):
@@ -155,6 +160,31 @@ def test_report_uses_full_width_layout_and_separate_date_time_columns(client, ap
         assert f"<th>{heading}</th>" in page
     assert "<th>開始</th>" not in page
     assert "<th>完成</th>" not in page
+
+
+def test_manager_report_matches_full_order_result_fields_and_date_only_creation_time(client, app):
+    _, _, _, order_a, _ = setup_data(app)
+    with app.app_context():
+        get_db().execute(
+            "UPDATE inspection_order SET created_at=? WHERE id=?",
+            ("2026-10-28T00:00:00+00:00", order_a),
+        )
+        get_db().commit()
+
+    page = client.get("/manager?order_no=A001").get_data(as_text=True)
+
+    assert "<h2>訂單查詢結果</h2>" in page
+    assert "<th>校機建立時間</th>" in page
+    assert "<th>客戶</th>" in page
+    for heading in ("開始日期", "開始時間", "結束日期", "結束時間", "總經過", "缺料時間", "實際工時"):
+        assert f"<th>{heading}</th>" in page
+    assert "2026-10-28" in page
+    assert "2026-10-28 08:00:00" not in page
+    assert "<strong>建立時間：</strong>" not in page
+
+
+def test_manager_report_is_read_only(client):
+    assert client.post("/manager").status_code == 405
 
 
 def test_report_detail_is_paginated_to_25_rows(client, app):
@@ -291,7 +321,8 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
     assert "列印缺料/補料條碼" in page
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V406.10.29</div>' in client.get("/").get_data(as_text=True)
+    assert "固定暫停條碼 → 該訂單 START" in page
+    assert '<div class="home-version" aria-label="系統版本">V501.11.02</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
@@ -396,6 +427,44 @@ def test_material_shortage_pause_resume_and_net_work_time(client, app):
         assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["material_pause_seconds"]) == "01:30:00"
 
 
+def test_manual_pause_resume_excludes_time_from_actual_work_and_blocks_finish(client, app):
+    _, worker_a, _, order_a, _ = setup_data(app)
+    with app.app_context():
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        assert client.post("/api/scan", json={"payload": payload_for(order_a, "START")}).json["result"] == "success"
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        pause_selected = client.post("/api/scan", json={"payload": pause_barcode()})
+        assert pause_selected.json["result"] == "success"
+        assert pause_selected.json["pause_action"] == "PAUSE"
+        paused = client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        assert paused.json["result"] == "success"
+        assert "暫停成功" in paused.json["message"]
+        assert get_order(order_a)["manual_paused"] == 1
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        blocked_finish = client.post("/api/scan", json={"payload": payload_for(order_a, "FINISH")})
+        assert blocked_finish.status_code == 400
+        assert "人工暫停" in blocked_finish.json["message"]
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        resumed = client.post("/api/scan", json={"payload": payload_for(order_a, "START")})
+        assert resumed.json["result"] == "success"
+        assert "恢復成功" in resumed.json["message"]
+        assert get_order(order_a)["manual_paused"] == 0
+
+        client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
+        assert client.post("/api/scan", json={"payload": payload_for(order_a, "FINISH")}).json["result"] == "success"
+
+        db = get_db()
+        db.execute("UPDATE inspection_order SET started_at='2026-10-28T00:00:00+00:00',finished_at='2026-10-28T03:00:00+00:00' WHERE id=?", (order_a,))
+        db.execute("UPDATE inspection_manual_pause SET paused_at='2026-10-28T01:00:00+00:00',resumed_at='2026-10-28T02:00:00+00:00' WHERE order_id=?", (order_a,))
+        db.commit()
+        report_row = query_report({"order_no": "A001"})[0]
+        assert report_row["manual_pause_seconds"] == 3600
+        assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["material_pause_seconds"] + report_row["manual_pause_seconds"]) == "02:00:00"
+
+
 def test_work_duration_excludes_evenings_lunch_and_weekends():
     assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-30T02:00:00+00:00") == "10:00:00"
     assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-29T12:00:00+00:00") == "08:00:00"
@@ -428,6 +497,14 @@ def test_material_barcodes_print_and_replenish_requires_open_pause(client, app):
         pause = get_db().execute("SELECT * FROM inspection_material_pause WHERE order_id=?", (order_a,)).fetchone()
         assert pause["resumed_at"] is not None
         assert get_order(order_a)["material_paused"] == 0
+
+
+def test_manual_pause_barcode_print_page(client):
+    page = client.get("/pause-barcodes/print")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert "暫停固定條碼" in html
+    assert pause_barcode() in html
 
 
 def test_existing_inspection_database_adds_material_pause_table_without_losing_orders(app):
@@ -507,7 +584,7 @@ def test_same_machine_history_report_and_excel(client, app, tmp_path):
         from openpyxl import load_workbook
         workbook = load_workbook(output, read_only=True)
         detail = workbook["訂單明細"]
-        assert [cell.value for cell in detail[1]] == ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態", "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "實際校機工時", "重新檢驗原因"]
+        assert [cell.value for cell in detail[1]] == ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態", "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "人工暫停時間", "實際校機工時", "重新檢驗原因"]
         assert "員工編號" not in [cell.value for cell in detail[1]]
         exported_rows = {values[0]: values for values in detail.iter_rows(min_row=2, values_only=True)}
         assert exported_rows["A001"][9:13] == ("2026-10-28", "09:02:03", "2026-10-28", "12:05:06")

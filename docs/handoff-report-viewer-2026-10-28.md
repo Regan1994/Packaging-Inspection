@@ -1,6 +1,6 @@
 # 校機報工報表閱讀器／主系統交接文件
 
-更新日期：2026-10-28
+更新日期：2026-10-30
 
 這份文件供下一個 Codex 視窗在修 bug 前閱讀。先確認 bug 是閱讀器啟動器問題，還是主系統 `/manager` 報表頁問題。
 
@@ -14,7 +14,8 @@
 - 伺服器電腦：`192.168.0.193`
 - 目前使用的是打包好的 `InspectionReporting.exe`
 - 分支：`codex/material-shortage-pause`
-- 最近 commit：`200df21 Add read-only manager report entry`
+- 最近已推送 commit：`534e76b Prevent accidental order submission with Enter`
+- `/manager` 入口最初加入的 commit：`200df21 Add read-only manager report entry`
 
 ### 閱讀器
 
@@ -43,6 +44,22 @@
 
 已在五台電腦實際測試，均可使用。
 
+## 主系統與閱讀器的關係
+
+兩者是兩個不同專案，但不是兩套報工系統，也不建立兩份資料庫：
+
+- `InspectionReporting.exe`：主系統，放在 `192.168.0.193` 主機，負責 Flask、SQLite、訂單與校機資料。
+- `ReportViewer.exe`：閱讀器，放在業務經理電腦，只負責開啟主系統的 `/manager` 網址。
+- 閱讀器不執行 Flask、不連 SQLite、不修改資料，也不包含主系統。
+- `/manager` 報表頁屬於主系統，不是閱讀器內建頁面。
+
+主系統發布資料夾名稱：
+
+- 舊的 `InspectionReporting`：原本 V405 主系統，可能沒有 `/manager`。
+- 新的 `InspectionReporting-manager`：重新打包、包含 `/manager` 的主系統發布包；名稱只是為了辨識，不代表包含 `ReportViewer.exe`。
+
+部署新版後，建議將新版資料夾改名為標準名稱 `InspectionReporting`，舊版保留為 `InspectionReporting-V405-backup`。不可同時啟動兩個主系統，因為都使用 5000 port。
+
 ## 主系統 `/manager`
 
 相關檔案：
@@ -59,6 +76,8 @@ GET http://192.168.0.193:5000/manager
 目前頁面功能：
 
 - 訂單號碼、機型、機台製號、校機人員與狀態查詢
+- 查詢結果顯示校機建立時間、客戶、開始／結束日期與時間、總經過、缺料時間、實際校機工時
+- 校機建立時間只顯示年月日，不顯示時分秒
 - 判斷待校機、校機中、缺料暫停、已完成、已取消
 - 單筆訂單明細
 - 開始／結束時間
@@ -118,13 +137,21 @@ C:\Users\TJR_\Documents\ChatGPT\校機報工閱讀器\publish\win-x64\ReportView
 
 ## 主系統打包與部署
 
-主系統打包包為本機產生的：
+主系統最新打包包為本機產生的：
 
 ```text
-C:\Users\TJR_\Documents\ChatGPT\校機報工閱讀器\InspectionReporting-manager.zip
+C:\Users\TJR_\Documents\ChatGPT\校機報工\dist\InspectionReporting-manager.zip
 ```
 
-主系統測試結果：`24 passed, 1 skipped`。
+本次打包包含完整 onedir 發布包：
+
+```text
+C:\Users\TJR_\Documents\ChatGPT\校機報工\dist\InspectionReporting
+```
+
+主系統測試結果：`29 passed, 1 skipped`。
+
+本次新版已在使用者主機更新完成；若要重新發布，仍須遵守以下資料庫保留規則。
 
 部署新版主系統時：
 
@@ -132,10 +159,28 @@ C:\Users\TJR_\Documents\ChatGPT\校機報工閱讀器\InspectionReporting-manage
 2. 將新版 ZIP 解壓縮到新資料夾。
 3. 備份伺服器舊資料夾的 `instance`。
 4. 將舊版正式 `instance` 內容帶到新版資料夾。
-5. 從新版資料夾執行 `InspectionReporting.exe`。
+5. 確認新版資料夾內的主程式仍叫 `InspectionReporting.exe`，再執行它。
 6. 測試 `http://192.168.0.193:5000/manager`。
+7. 測試正常後，可把舊資料夾保留為 `InspectionReporting-V405-backup`，新版使用標準名稱 `InspectionReporting`。
 
 不要用 ZIP 裡的空白／測試 `instance` 覆蓋正式 SQLite，也不要只複製 EXE。這是 onedir 發布包。
+
+## 目前本機 Git 狀態
+
+主系統目前位於：
+
+```text
+C:\Users\TJR_\Documents\ChatGPT\校機報工
+```
+
+目前分支：`codex/material-shortage-pause`。
+
+這次欄位修改已完成並用來打包，但尚未 commit／push，工作區目前有：
+
+- `templates/manager.html`
+- `tests/test_inspection.py`
+
+若新視窗要繼續修 bug，先檢查這兩個未提交檔案，不要用 reset 或 checkout 覆蓋它們。
 
 ## 修 bug 時的判斷順序
 
