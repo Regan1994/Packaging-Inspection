@@ -95,6 +95,7 @@
 
     <section class="panel">
       <form method="get" class="filters manager-filters">
+        <button class="manager-filter-enter-submit" type="submit" aria-hidden="true" tabindex="-1">查詢</button>
         <div class="manager-filter-fields">
           <label>訂單號碼<input name="order_no" value="{{ filters.get('order_no', '') }}"></label>
           <label>機型<input name="model_name" value="{{ filters.get('model_name', '') }}"></label>

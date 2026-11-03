@@ -190,6 +190,7 @@ def test_manager_report_uses_requested_columns_and_creation_date_only(client, ap
     assert "每頁 25 台" in page
     assert "下載 Excel" in page
     assert 'class="manager-filter-actions"' in page
+    assert page.index('class="manager-filter-enter-submit"') < page.index('manager-filter-download')
     assert '>清除</a>' in page
     assert 'href="/manager"' in page
 
