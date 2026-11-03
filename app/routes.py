@@ -571,11 +571,14 @@ def order_edit(order_id):
     if not token:
         token = secrets.token_urlsafe(32)
         session["order_delete_token"] = token
+    material_pauses = list_material_pauses(order_id)
+    manual_pauses = list_manual_pauses(order_id)
     return render_template(
         "inspection_order_edit.html",
         order=order,
-        material_pauses=list_material_pauses(order_id),
-        manual_pauses=list_manual_pauses(order_id),
+        material_pauses=material_pauses,
+        manual_pauses=manual_pauses,
+        pause_intervals=material_pauses + manual_pauses,
         workers=list_inspection_workers(active_only=True),
         correction_workers=list_inspection_workers(),
         corrections=list_order_corrections(order_id),
@@ -828,6 +831,11 @@ def manager():
     """Read-only report entry for the business manager viewer."""
     filters = request.args.to_dict()
     detail_id = (filters.pop("detail_id", "") or "").strip()
+    raw_page = filters.pop("page", "1")
+    try:
+        current_page = max(1, int(raw_page))
+    except (TypeError, ValueError):
+        current_page = 1
     detail = None
     material_pauses = []
     manual_pauses = []
@@ -837,16 +845,54 @@ def manager():
             material_pauses = list_material_pauses(detail["id"])
             manual_pauses = list_manual_pauses(detail["id"])
 
-    rows = query_report(filters)
+    all_rows = query_report(filters)
+    today = datetime.now(TAIPEI_TZ).date().isoformat()
+    for row in all_rows:
+        expected_ship_date = row.get("expected_ship_date") or ""
+        has_open_status = row["status"] not in {"completed", "cancelled"}
+        row["is_overdue"] = bool(expected_ship_date and expected_ship_date < today and has_open_status)
+        row["is_due_today"] = bool(expected_ship_date == today and has_open_status)
+    total_rows = len(all_rows)
+    total_pages = max(1, (total_rows + REPORT_PAGE_SIZE - 1) // REPORT_PAGE_SIZE)
+    current_page = min(current_page, total_pages)
+    page_start = (current_page - 1) * REPORT_PAGE_SIZE
+    rows = all_rows[page_start:page_start + REPORT_PAGE_SIZE]
+    visible_pages = sorted({1, total_pages, *range(max(1, current_page - 2), min(total_pages, current_page + 2) + 1)})
+    pagination_items = []
+    for page in visible_pages:
+        if pagination_items and page > pagination_items[-1] + 1:
+            pagination_items.append(None)
+        pagination_items.append(page)
+    query_args = {**filters, "page": current_page}
     return render_template(
         "manager.html",
         rows=rows,
         filters=filters,
+        query_args=query_args,
         workers=list_report_workers(),
+        total_rows=total_rows,
+        current_page=current_page,
+        total_pages=total_pages,
+        pagination_items=pagination_items,
         detail=detail,
         material_pauses=material_pauses,
         manual_pauses=manual_pauses,
+        detail_pause_intervals=material_pauses + manual_pauses,
     )
+
+
+@bp.get("/manager/export")
+def manager_export():
+    """Download all rows matching the manager viewer's current filters."""
+    filters = request.args.to_dict()
+    filters.pop("detail_id", None)
+    filters.pop("page", None)
+    rows = query_report(filters)
+    temporary = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    temporary.close()
+    export_xlsx(rows, temporary.name)
+    filename = datetime.now().strftime("%Y%m%d") + "Report.xlsx"
+    return send_file(temporary.name, as_attachment=True, download_name=filename)
 
 
 @bp.post("/reports/export")

@@ -21,29 +21,47 @@
     </section>
 
     {% if detail %}
-    <section class="panel">
-      <h2>訂單明細：{{ detail.order_no }}</h2>
-      <div class="grid three">
-        <p><strong>機型：</strong>{{ detail.model_name_snapshot }}</p>
-        <p><strong>軸別：</strong>{{ '五軸' if detail.axis_type_snapshot == '5' else '四軸' }}</p>
-        <p><strong>機台製號：</strong>{{ detail.machine_serial }}</p>
-        <p><strong>客戶：</strong>{{ detail.customer_name or '-' }}</p>
-        <p><strong>預計出貨日：</strong>{{ detail.expected_ship_date or '-' }}</p>
-        <p><strong>校機人員：</strong>{{ detail.worker_name_snapshot or '未認領' }}</p>
-        <p><strong>目前狀態：</strong>{% if detail.status == 'started' and detail.material_paused %}缺料暫停{% elif detail.status == 'started' and detail.manual_paused %}人工暫停{% else %}{{ status_label(detail.status) }}{% endif %}</p>
-        <p><strong>校機建立時間：</strong>{{ format_date(detail.created_at) }}</p>
-        <p><strong>開始時間：</strong>{{ format_datetime(detail.started_at) }}</p>
-        <p><strong>結束時間：</strong>{{ format_datetime(detail.finished_at) }}</p>
-        <p><strong>總經過時間：</strong>{{ format_duration(detail.started_at, detail.finished_at, detail.status) }}</p>
-        <p><strong>缺料時間：</strong>{{ format_seconds(detail.material_pause_seconds) }}</p>
-        <p><strong>人工暫停時間：</strong>{{ format_seconds(detail.manual_pause_seconds) }}</p>
-        <p><strong>實際校機工時：</strong>{{ format_work_duration(detail.started_at, detail.finished_at, detail.material_pause_seconds + detail.manual_pause_seconds) }}</p>
+    <section class="panel manager-detail-panel">
+      <div class="manager-detail-header">
+        <div>
+          <p class="eyebrow">ORDER DETAIL</p>
+          <h2>訂單明細：{{ detail.order_no }}</h2>
+          <p class="manager-detail-subtitle">{{ detail.model_name_snapshot }}　／　{{ detail.machine_serial }}　／　{{ '五軸' if detail.axis_type_snapshot == '5' else '四軸' }}</p>
+        </div>
+        <a class="button" href="{{ url_for('main.manager', **query_args) }}">返回查詢結果</a>
       </div>
-      {% if detail.reinspection_reason %}<p><strong>重新檢驗原因：</strong>{{ detail.reinspection_reason }}</p>{% endif %}
-      <a class="button" href="{{ url_for('main.manager', **filters) }}">返回查詢結果</a>
+
+      <div class="manager-detail-section">
+        <h3>基本資料</h3>
+        <div class="manager-detail-fields">
+          <div class="manager-detail-field"><span>機型</span><strong>{{ detail.model_name_snapshot }}</strong></div>
+          <div class="manager-detail-field"><span>軸別</span><strong>{{ '五軸' if detail.axis_type_snapshot == '5' else '四軸' }}</strong></div>
+          <div class="manager-detail-field"><span>機台製號</span><strong>{{ detail.machine_serial }}</strong></div>
+          <div class="manager-detail-field"><span>客戶</span><strong>{{ detail.customer_name or '-' }}</strong></div>
+          <div class="manager-detail-field"><span>預計出貨日</span><strong>{{ detail.expected_ship_date or '-' }}</strong></div>
+          <div class="manager-detail-field"><span>校機人員</span><strong>{{ detail.worker_name_snapshot or '未認領' }}</strong></div>
+          <div class="manager-detail-field"><span>目前狀態</span><strong>{% if detail.status == 'started' and detail.material_paused %}缺料暫停{% elif detail.status == 'started' and detail.manual_paused %}人工暫停{% else %}{{ status_label(detail.status) }}{% endif %}</strong></div>
+          <div class="manager-detail-field"><span>校機建立日期</span><strong>{{ format_date(detail.created_at) }}</strong></div>
+          {% if detail.reinspection_reason %}<div class="manager-detail-field manager-detail-field-wide"><span>重新檢驗原因</span><strong>{{ detail.reinspection_reason }}</strong></div>{% endif %}
+        </div>
+      </div>
+
+      <div class="manager-detail-section">
+        <h3>時間與工時</h3>
+        <div class="manager-detail-fields manager-detail-time-fields">
+          <div class="manager-detail-field"><span>開始時間</span><strong>{{ format_datetime(detail.started_at) }}</strong></div>
+          <div class="manager-detail-field"><span>結束時間</span><strong>{{ format_datetime(detail.finished_at) }}</strong></div>
+        </div>
+        <div class="manager-detail-metrics">
+          <div><span>總經過時間</span><strong>{{ format_duration(detail.started_at, detail.finished_at, detail.status) }}</strong></div>
+          <div><span>缺料時間</span><strong>{{ format_seconds(detail.material_pause_seconds) }}</strong></div>
+          <div><span>人工暫停時間</span><strong>{{ format_seconds(detail.manual_pause_seconds) }}</strong></div>
+          <div class="manager-detail-metric-primary"><span>實際校機工時</span><strong>{{ format_work_duration(detail.started_at, detail.finished_at, detail_pause_intervals) }}</strong></div>
+        </div>
+      </div>
     </section>
 
-    <section class="panel table-wrap">
+    <section class="panel table-wrap manager-detail-pause-panel">
       <h2>缺料／人工暫停紀錄</h2>
       {% if material_pauses or manual_pauses %}
       <table>
@@ -76,26 +94,34 @@
     {% endif %}
 
     <section class="panel">
-      <form method="get" class="filters">
-        <label>訂單號碼<input name="order_no" value="{{ filters.get('order_no', '') }}"></label>
-        <label>機型<input name="model_name" value="{{ filters.get('model_name', '') }}"></label>
-        <label>機台製號<input name="machine_serial" value="{{ filters.get('machine_serial', '') }}"></label>
-        <label>校機人員<select name="worker_name"><option value="">全部</option>{% for worker in workers %}<option value="{{ worker.name }}" {% if filters.get('worker_name') == worker.name %}selected{% endif %}>{{ worker.name }}（{{ worker.employee_no }}）</option>{% endfor %}</select></label>
-        <label>狀態<select name="status_group"><option value="">全部</option><option value="pending" {% if filters.get('status_group') == 'pending' %}selected{% endif %}>待校機</option><option value="started" {% if filters.get('status_group') == 'started' %}selected{% endif %}>校機中</option><option value="material_paused" {% if filters.get('status_group') == 'material_paused' %}selected{% endif %}>缺料暫停</option><option value="manual_paused" {% if filters.get('status_group') == 'manual_paused' %}selected{% endif %}>人工暫停</option><option value="completed" {% if filters.get('status_group') == 'completed' %}selected{% endif %}>已完成</option><option value="cancelled" {% if filters.get('status_group') == 'cancelled' %}selected{% endif %}>已取消</option><option value="incomplete" {% if filters.get('status_group') == 'incomplete' %}selected{% endif %}>未完成</option></select></label>
-        <button class="button primary">查詢</button>
+      <form method="get" class="filters manager-filters">
+        <div class="manager-filter-fields">
+          <label>訂單號碼<input name="order_no" value="{{ filters.get('order_no', '') }}"></label>
+          <label>機型<input name="model_name" value="{{ filters.get('model_name', '') }}"></label>
+          <label>機台製號<input name="machine_serial" value="{{ filters.get('machine_serial', '') }}"></label>
+          <label>校機人員<select name="worker_name"><option value="">全部</option>{% for worker in workers %}<option value="{{ worker.name }}" {% if filters.get('worker_name') == worker.name %}selected{% endif %}>{{ worker.name }}（{{ worker.employee_no }}）</option>{% endfor %}</select></label>
+          <label>狀態<select name="status_group"><option value="">全部</option><option value="pending" {% if filters.get('status_group') == 'pending' %}selected{% endif %}>待校機</option><option value="started" {% if filters.get('status_group') == 'started' %}selected{% endif %}>校機中</option><option value="material_paused" {% if filters.get('status_group') == 'material_paused' %}selected{% endif %}>缺料暫停</option><option value="manual_paused" {% if filters.get('status_group') == 'manual_paused' %}selected{% endif %}>人工暫停</option><option value="completed" {% if filters.get('status_group') == 'completed' %}selected{% endif %}>已完成</option><option value="cancelled" {% if filters.get('status_group') == 'cancelled' %}selected{% endif %}>已取消</option><option value="incomplete" {% if filters.get('status_group') == 'incomplete' %}selected{% endif %}>未完成</option></select></label>
+          <label>排序<select name="sort_by"><option value="created_desc" {% if filters.get('sort_by', 'created_desc') == 'created_desc' %}selected{% endif %}>校機建立日期：新到舊</option><option value="order_no_desc" {% if filters.get('sort_by') == 'order_no_desc' %}selected{% endif %}>訂單號碼：大到小</option><option value="expected_ship_date_asc" {% if filters.get('sort_by') == 'expected_ship_date_asc' %}selected{% endif %}>預計出貨日：近到遠</option><option value="expected_ship_date_desc" {% if filters.get('sort_by') == 'expected_ship_date_desc' %}selected{% endif %}>預計出貨日：遠到近</option></select></label>
+          <button class="button manager-filter-download" type="submit" formaction="{{ url_for('main.manager_export') }}" formmethod="get">下載 Excel</button>
+        </div>
+        <div class="manager-filter-actions">
+          <button class="button primary" type="submit">查詢</button>
+          <a class="button" href="{{ url_for('main.manager') }}">清除</a>
+        </div>
       </form>
     </section>
 
     <section class="panel table-wrap">
       <h2>訂單查詢結果</h2>
-      <p class="muted">共 {{ rows|length }} 筆訂單</p>
-      <table class="report-detail-table">
-        <tr><th>訂單</th><th>校機建立時間</th><th>機型</th><th>機台製號</th><th>客戶</th><th>校機人員</th><th>目前狀態</th><th>開始日期</th><th>開始時間</th><th>結束日期</th><th>結束時間</th><th>總經過</th><th>缺料時間</th><th>人工暫停時間</th><th>實際工時</th><th>明細</th></tr>
+      <p class="muted">共 {{ total_rows }} 筆訂單；每頁 25 台，目前第 {{ current_page }}／{{ total_pages }} 頁。下載 Excel 會包含目前篩選條件下的全部結果。</p>
+      <table class="report-detail-table manager-report-table">
+        <tr><th>訂單</th><th>校機建立日期</th><th>預計出貨日</th><th>機型</th><th>機台製號</th><th>客戶</th><th>校機人員</th><th>目前狀態</th><th>開始日期</th><th>開始時間</th><th>結束日期</th><th>結束時間</th><th>實際工時</th><th>明細</th></tr>
         {% for row in rows %}
-        <tr>
+        <tr{% if row.is_overdue %} class="manager-row-overdue"{% elif row.is_due_today %} class="manager-row-due-today"{% endif %}>
           <td>{{ row.order_no }}</td>
           <td>{{ format_date(row.created_at) }}</td>
-          <td>{{ row.model_name_snapshot }}<small>{{ '五軸' if row.axis_type_snapshot == '5' else '四軸' }}</small></td>
+          <td>{{ row.expected_ship_date or '-' }}{% if row.is_overdue %}<small class="manager-deadline-label overdue">已逾期</small>{% elif row.is_due_today %}<small class="manager-deadline-label due-today">今日到期</small>{% endif %}</td>
+          <td>{{ row.model_name_snapshot }}</td>
           <td>{{ row.machine_serial }}</td>
           <td>{{ row.customer_name or '-' }}</td>
           <td>{{ row.worker_name_snapshot or '未認領' }}</td>
@@ -104,16 +130,24 @@
           <td>{{ format_time(row.started_at) }}</td>
           <td>{{ format_date(row.finished_at) }}</td>
           <td>{{ format_time(row.finished_at) }}</td>
-          <td>{{ format_duration(row.started_at, row.finished_at, row.status) }}</td>
-          <td>{{ format_seconds(row.material_pause_seconds) }}</td>
-          <td>{{ format_seconds(row.manual_pause_seconds) }}</td>
-          <td>{{ format_work_duration(row.started_at, row.finished_at, row.material_pause_seconds + row.manual_pause_seconds) }}</td>
-          <td><a class="button small" href="{{ url_for('main.manager', detail_id=row.id, **filters) }}">查看明細</a></td>
+          <td>{{ format_work_duration(row.started_at, row.finished_at, row.pause_intervals) }}</td>
+          <td><a class="button small" href="{{ url_for('main.manager', detail_id=row.id, **query_args) }}">查看明細</a></td>
         </tr>
         {% else %}
-        <tr><td colspan="16" class="empty">沒有符合條件的訂單。</td></tr>
+        <tr><td colspan="14" class="empty">沒有符合條件的訂單。</td></tr>
         {% endfor %}
       </table>
+      {% if total_pages > 1 %}
+      <nav class="pagination" aria-label="訂單查詢結果分頁">
+        {% if current_page > 1 %}<a class="button small" href="{{ url_for('main.manager', page=current_page - 1, **filters) }}">上一頁</a>{% endif %}
+        {% for page in pagination_items %}
+          {% if page is none %}<span class="muted">…</span>
+          {% elif page == current_page %}<span class="button small primary" aria-current="page">{{ page }}</span>
+          {% else %}<a class="button small" href="{{ url_for('main.manager', page=page, **filters) }}">{{ page }}</a>{% endif %}
+        {% endfor %}
+        {% if current_page < total_pages %}<a class="button small" href="{{ url_for('main.manager', page=current_page + 1, **filters) }}">下一頁</a>{% endif %}
+      </nav>
+      {% endif %}
     </section>
   </main>
 </body>

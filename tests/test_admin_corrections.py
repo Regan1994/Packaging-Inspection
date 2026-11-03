@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from app.db import get_db
-from app.services import create_inspection_worker, create_model, create_order, get_order
+from app.services import create_inspection_worker, create_model, create_order, format_work_duration, get_order
 
 
 def setup_order(app):
@@ -61,7 +61,7 @@ def test_admin_order_correction_requires_password_backs_up_and_audits(client, ap
 
     response = client.post(
         f"/orders/{order_id}/admin-correct",
-        data=correction_data(worker_b, finished_at="2026-10-29T10:00"),
+        data=correction_data(worker_b, started_at="2026-10-29T16:00", finished_at="2026-10-29T20:00"),
     )
     assert response.status_code == 302
 
@@ -74,8 +74,9 @@ def test_admin_order_correction_requires_password_backs_up_and_audits(client, ap
         order = get_order(order_id)
         assert order["status"] == "completed"
         assert order["worker_id"] == worker_b
-        assert order["started_at"] == "2026-10-29T00:00:00+00:00"
-        assert order["finished_at"] == "2026-10-29T02:00:00+00:00"
+        assert order["started_at"] == "2026-10-29T08:00:00+00:00"
+        assert order["finished_at"] == "2026-10-29T12:00:00+00:00"
+        assert format_work_duration(order["started_at"], order["finished_at"]) == "03:30:00"
         audit = get_db().execute(
             "SELECT * FROM inspection_audit_log WHERE action='admin_correct_order' AND entity_id=?",
             (str(order_id),),

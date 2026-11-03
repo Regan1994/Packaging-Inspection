@@ -966,8 +966,8 @@ def format_duration(started_at, finished_at, status=None, paused_seconds=0):
     return format_seconds(seconds)
 
 
-def format_work_duration(started_at, finished_at, paused_seconds=0):
-    """Format inspection work time inside the normal weekday work schedule."""
+def format_work_duration(started_at, finished_at, pause_intervals=None):
+    """Format work time in eligible windows, excluding only overlapping pause time."""
     if not started_at:
         return "-"
     try:
@@ -982,21 +982,67 @@ def format_work_duration(started_at, finished_at, paused_seconds=0):
         if end <= start:
             return format_seconds(0)
 
-        total_seconds = 0
+        def has_scan_on_day(day, after):
+            return any(moment.date() == day and moment.time() >= after for moment in (start, end))
+
+        work_intervals = []
         current_date = start.date()
         end_date = end.date()
         while current_date <= end_date:
-            if current_date.weekday() < 5:
-                for window_start, window_end in ((time(8, 0), time(12, 0)), (time(13, 0), time(17, 0))):
+            is_weekend = current_date.weekday() >= 5
+            is_workday = not is_weekend or has_scan_on_day(current_date, time(8, 0))
+            if is_workday:
+                windows = [(time(8, 0), time(12, 0)), (time(13, 0), time(17, 0))]
+                if has_scan_on_day(current_date, time(17, 30)):
+                    windows.append((time(17, 30), time(20, 30)))
+                for window_start, window_end in windows:
                     work_start = datetime.combine(current_date, window_start, tzinfo=TAIPEI_TZ)
                     work_end = datetime.combine(current_date, window_end, tzinfo=TAIPEI_TZ)
                     overlap_start = max(start, work_start)
                     overlap_end = min(end, work_end)
                     if overlap_end > overlap_start:
-                        total_seconds += int((overlap_end - overlap_start).total_seconds())
+                        work_intervals.append((overlap_start, overlap_end))
             current_date += timedelta(days=1)
 
-        total_seconds = max(0, total_seconds - int(round(float(paused_seconds or 0))))
+        total_seconds = sum(int((work_end - work_start).total_seconds()) for work_start, work_end in work_intervals)
+
+        # Accepting a numeric value keeps older callers compatible, but new report
+        # callers pass the actual pause ranges so breaks outside work windows are
+        # never deducted from calibration time.
+        if isinstance(pause_intervals, (int, float)):
+            return format_seconds(max(0, total_seconds - int(round(pause_intervals))))
+
+        pause_overlaps = []
+        for pause in pause_intervals or []:
+            try:
+                pause_start = datetime.fromisoformat(pause["paused_at"])
+                pause_end = datetime.fromisoformat(pause["resumed_at"]) if pause["resumed_at"] else end
+                if pause_start.tzinfo is None:
+                    pause_start = pause_start.replace(tzinfo=TAIPEI_TZ)
+                if pause_end.tzinfo is None:
+                    pause_end = pause_end.replace(tzinfo=TAIPEI_TZ)
+                pause_start = pause_start.astimezone(TAIPEI_TZ)
+                pause_end = pause_end.astimezone(TAIPEI_TZ)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            for work_start, work_end in work_intervals:
+                overlap_start = max(work_start, pause_start)
+                overlap_end = min(work_end, pause_end)
+                if overlap_end > overlap_start:
+                    pause_overlaps.append((overlap_start, overlap_end))
+
+        # A material pause and a manual pause should not be deducted twice if an
+        # old record happens to overlap another pause record.
+        deducted_seconds = 0
+        latest_end = None
+        for overlap_start, overlap_end in sorted(pause_overlaps):
+            if latest_end is None or overlap_start > latest_end:
+                deducted_seconds += int((overlap_end - overlap_start).total_seconds())
+                latest_end = overlap_end
+            elif overlap_end > latest_end:
+                deducted_seconds += int((overlap_end - latest_end).total_seconds())
+                latest_end = overlap_end
+        total_seconds = max(0, total_seconds - deducted_seconds)
     except (TypeError, ValueError, OverflowError):
         return "-"
     return format_seconds(total_seconds)
@@ -2237,6 +2283,30 @@ def list_report_workers():
     return rows
 
 
+def _report_pause_intervals(order_ids):
+    """Return all material/manual pause intervals grouped by order ID."""
+    if not order_ids:
+        return {}
+    placeholders = ",".join("?" for _ in order_ids)
+    rows = get_db().execute(
+        f"""
+        SELECT order_id, paused_at, resumed_at
+        FROM inspection_material_pause
+        WHERE order_id IN ({placeholders})
+        UNION ALL
+        SELECT order_id, paused_at, resumed_at
+        FROM inspection_manual_pause
+        WHERE order_id IN ({placeholders})
+        ORDER BY order_id, paused_at
+        """,
+        [*order_ids, *order_ids],
+    ).fetchall()
+    intervals = {order_id: [] for order_id in order_ids}
+    for row in rows:
+        intervals[row["order_id"]].append(dict(row))
+    return intervals
+
+
 def query_report(filters):
     clauses, params = [], []
     status_group = (filters.get("status_group") or "").strip()
@@ -2278,14 +2348,28 @@ def query_report(filters):
     """
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    return get_db().execute(sql + " ORDER BY o.created_at DESC, o.id DESC", [utc_now(), utc_now(), *params]).fetchall()
+    sort_by = (filters.get("sort_by") or "created_desc").strip()
+    sort_orders = {
+        "created_desc": "o.created_at DESC, o.id DESC",
+        "order_no_desc": "o.order_no DESC, o.id DESC",
+        "expected_ship_date_asc": "CASE WHEN o.expected_ship_date IS NULL OR o.expected_ship_date='' THEN 1 ELSE 0 END, o.expected_ship_date ASC, o.id DESC",
+        "expected_ship_date_desc": "CASE WHEN o.expected_ship_date IS NULL OR o.expected_ship_date='' THEN 1 ELSE 0 END, o.expected_ship_date DESC, o.id DESC",
+    }
+    rows = get_db().execute(sql + " ORDER BY " + sort_orders.get(sort_by, sort_orders["created_desc"]), [utc_now(), utc_now(), *params]).fetchall()
+    intervals_by_order = _report_pause_intervals([row["id"] for row in rows])
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["pause_intervals"] = intervals_by_order.get(row["id"], [])
+        result.append(item)
+    return result
 
 
 def summarize_report_by_worker(rows):
     summary = {}
     for row in rows:
         key = row["worker_name_snapshot"] or "未認領"
-        item = summary.setdefault(key, {"worker_name": key, "total": 0, "completed": 0, "started": 0, "material_paused": 0, "manual_paused": 0, "pending": 0, "cancelled": 0, "completion_rate": 0.0})
+        item = summary.setdefault(key, {"worker_name": key, "total": 0, "completed": 0, "started": 0, "material_paused": 0, "manual_paused": 0, "pending": 0, "cancelled": 0})
         item["total"] += 1
         if row["status"] == "started" and row["material_paused"]:
             item["material_paused"] += 1
@@ -2293,10 +2377,47 @@ def summarize_report_by_worker(rows):
             item["manual_paused"] += 1
         else:
             item[row["status"]] += 1
-    for item in summary.values():
-        active = item["total"] - item["cancelled"]
-        item["completion_rate"] = round(item["completed"] / active * 100, 1) if active else 0.0
     return sorted(summary.values(), key=lambda item: item["worker_name"])
+
+
+def summarize_report_by_worker_axis_model(rows):
+    """Summarize non-cancelled inspection rows into one worksheet per worker."""
+    summaries = {}
+    for row in rows:
+        if row["status"] == "cancelled":
+            continue
+        worker_name = row["worker_name_snapshot"] or "未認領"
+        item = summaries.setdefault(
+            worker_name,
+            {
+                "worker_name": worker_name,
+                "axis_models": {
+                    "4": {"total": 0, "models": {}},
+                    "5": {"total": 0, "models": {}},
+                },
+            },
+        )
+        axis_type = "5" if str(row["axis_type_snapshot"] or "4") == "5" else "4"
+        axis_summary = item["axis_models"][axis_type]
+        axis_summary["total"] += 1
+        model_name = (row["model_name_snapshot"] or "-").strip() or "-"
+        axis_summary["models"][model_name] = axis_summary["models"].get(model_name, 0) + 1
+
+    result = []
+    for item in summaries.values():
+        result.append(
+            {
+                "worker_name": item["worker_name"],
+                "axis_models": {
+                    axis_type: {
+                        "total": item["axis_models"][axis_type]["total"],
+                        "models": sorted(item["axis_models"][axis_type]["models"].items(), key=lambda pair: pair[0].casefold()),
+                    }
+                    for axis_type in ("4", "5")
+                },
+            }
+        )
+    return sorted(result, key=lambda item: item["worker_name"])
 
 
 def summarize_report_by_axis(rows):
@@ -2316,7 +2437,7 @@ def summarize_report_by_axis(rows):
 
 def export_xlsx(rows, path):
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Font, PatternFill
 
     def excel_value(value):
         if not isinstance(value, str):
@@ -2324,15 +2445,46 @@ def export_xlsx(rows, path):
         return "'" + value if value[:1] in {"=", "+", "-", "@"} else value
 
     workbook = Workbook()
-    summary_sheet = workbook.active
-    summary_sheet.title = "人員統計"
-    summary_headers = ["校機人員", "訂單數", "已完成", "校機中", "缺料暫停", "待校機", "已取消", "完成率"]
-    summary_sheet.append(summary_headers)
-    for cell in summary_sheet[1]:
-        cell.font = Font(bold=True)
-    for item in summarize_report_by_worker(rows):
-        summary_sheet.append([excel_value(item["worker_name"]), item["total"], item["completed"], item["started"], item["material_paused"], item["pending"], item["cancelled"], f"{item['completion_rate']:.1f}%"])
-    detail = workbook.create_sheet("訂單明細")
+    detail = workbook.active
+    detail.title = "訂單明細"
+    used_sheet_names = {detail.title.casefold(), "軸別統計".casefold()}
+
+    def worksheet_name(worker_name):
+        base_name = re.sub(r'[:\\/?*\[\]]', " ", worker_name).strip() or "未認領"
+        base_name = base_name[:31]
+        candidate = base_name
+        suffix_number = 2
+        while candidate.casefold() in used_sheet_names:
+            suffix = f" ({suffix_number})"
+            candidate = base_name[:31 - len(suffix)] + suffix
+            suffix_number += 1
+        used_sheet_names.add(candidate.casefold())
+        return candidate
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    axis_fills = {"4": PatternFill("solid", fgColor="E8F1FA"), "5": PatternFill("solid", fgColor="E7F4F2")}
+    for index, item in enumerate(summarize_report_by_worker_axis_model(rows)):
+        sheet = workbook.create_sheet(worksheet_name(item["worker_name"]), index)
+        sheet.append(["校機人員", excel_value(item["worker_name"])])
+        sheet.append(["四軸總台數", item["axis_models"]["4"]["total"], "五軸總台數", item["axis_models"]["5"]["total"]])
+        sheet.append([])
+        sheet.append(["軸別", "機型", "台數"])
+        for cell in sheet[4]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+        for axis_type in ("4", "5"):
+            axis_label = axis_type_label(axis_type)
+            axis_summary = item["axis_models"][axis_type]
+            for model_name, count in axis_summary["models"]:
+                sheet.append([axis_label, excel_value(model_name), count])
+                for cell in sheet[sheet.max_row]:
+                    cell.fill = axis_fills[axis_type]
+            sheet.append([f"{axis_label}小計", "", axis_summary["total"]])
+            for cell in sheet[sheet.max_row]:
+                cell.font = Font(bold=True)
+                cell.fill = axis_fills[axis_type]
+        sheet.freeze_panes = "A5"
+
     headers = ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態", "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "人工暫停時間", "實際校機工時", "重新檢驗原因"]
     detail.append(headers)
     for cell in detail[1]:
@@ -2340,7 +2492,7 @@ def export_xlsx(rows, path):
 
     for row in rows:
         displayed_status = "缺料暫停" if row["material_paused"] else ("人工暫停" if row["manual_paused"] else status_label(row["status"]))
-        detail.append([excel_value(value) for value in [row["order_no"], row["model_name_snapshot"], axis_type_label(row["axis_type_snapshot"]), row["machine_serial"], row["customer_name"], row["expected_ship_date"] or "", row["worker_name_snapshot"] or "", format_datetime(row["created_at"]), displayed_status, format_date(row["started_at"]), format_time(row["started_at"]), format_date(row["finished_at"]), format_time(row["finished_at"]), format_duration(row["started_at"], row["finished_at"], row["status"]), format_seconds(row["material_pause_seconds"]), format_seconds(row["manual_pause_seconds"]), format_work_duration(row["started_at"], row["finished_at"], row["material_pause_seconds"] + row["manual_pause_seconds"]), row["reinspection_reason"]]])
+        detail.append([excel_value(value) for value in [row["order_no"], row["model_name_snapshot"], axis_type_label(row["axis_type_snapshot"]), row["machine_serial"], row["customer_name"], row["expected_ship_date"] or "", row["worker_name_snapshot"] or "", format_datetime(row["created_at"]), displayed_status, format_date(row["started_at"]), format_time(row["started_at"]), format_date(row["finished_at"]), format_time(row["finished_at"]), format_duration(row["started_at"], row["finished_at"], row["status"]), format_seconds(row["material_pause_seconds"]), format_seconds(row["manual_pause_seconds"]), format_work_duration(row["started_at"], row["finished_at"], row["pause_intervals"]), row["reinspection_reason"]]])
     axis_sheet = workbook.create_sheet("軸別統計")
     axis_sheet.append(["軸別", "訂單數", "已完成", "校機中", "缺料暫停", "待校機", "已取消"])
     for cell in axis_sheet[1]:
@@ -2348,9 +2500,10 @@ def export_xlsx(rows, path):
     for item in summarize_report_by_axis(rows):
         axis_sheet.append([item["axis_label"], item["total"], item["completed"], item["started"], item["material_paused"], item["pending"], item["cancelled"]])
     for sheet in workbook.worksheets:
-        sheet.freeze_panes = "A2"
+        if sheet.freeze_panes is None:
+            sheet.freeze_panes = "A2"
         for column in sheet.columns:
-            sheet.column_dimensions[column[0].column_letter].width = min(max(len(str(column[0].value or "")) + 2, 12), 28)
+            sheet.column_dimensions[column[0].column_letter].width = min(max(max(len(str(cell.value or "")) for cell in column) + 2, 12), 28)
     workbook.save(path)
 
 

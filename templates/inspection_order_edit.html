@@ -12,7 +12,7 @@
     <p><strong>狀態：</strong>{{ '缺料暫停' if order.material_paused else ('人工暫停' if order.manual_paused else status_label(order.status)) }}</p>
     <p><strong>缺料總時間：</strong>{{ format_seconds(order.material_pause_seconds) }}</p>
     <p><strong>人工暫停時間：</strong>{{ format_seconds(order.manual_pause_seconds) }}</p>
-    <p><strong>實際校機工時：</strong>{{ format_work_duration(order.started_at, order.finished_at, order.material_pause_seconds + order.manual_pause_seconds) }}</p>
+    <p><strong>實際校機工時：</strong>{{ format_work_duration(order.started_at, order.finished_at, pause_intervals) }}</p>
   </div>
   <div class="row">
     <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>

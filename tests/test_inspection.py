@@ -1,5 +1,6 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
 from app.db import get_db
@@ -21,6 +22,7 @@ from app.services import (
     set_inspection_worker_active,
     summarize_report_by_axis,
     summarize_report_by_worker,
+    TAIPEI_TZ,
     update_model,
     verify_sqlite_backup,
 )
@@ -162,9 +164,10 @@ def test_report_uses_full_width_layout_and_separate_date_time_columns(client, ap
         assert f"<th>{heading}</th>" in page
     assert "<th>開始</th>" not in page
     assert "<th>完成</th>" not in page
+    assert "完成率" not in page
 
 
-def test_manager_report_matches_full_order_result_fields_and_date_only_creation_time(client, app):
+def test_manager_report_uses_requested_columns_and_creation_date_only(client, app):
     _, _, _, order_a, _ = setup_data(app)
     with app.app_context():
         get_db().execute(
@@ -176,13 +179,134 @@ def test_manager_report_matches_full_order_result_fields_and_date_only_creation_
     page = client.get("/manager?order_no=A001").get_data(as_text=True)
 
     assert "<h2>訂單查詢結果</h2>" in page
-    assert "<th>校機建立時間</th>" in page
-    assert "<th>客戶</th>" in page
-    for heading in ("開始日期", "開始時間", "結束日期", "結束時間", "總經過", "缺料時間", "實際工時"):
+    assert "<th>校機建立日期</th>" in page
+    for heading in ("預計出貨日", "機型", "機台製號", "客戶", "校機人員", "目前狀態", "開始日期", "開始時間", "結束日期", "結束時間", "實際工時", "明細"):
         assert f"<th>{heading}</th>" in page
-    assert "2026-10-28" in page
-    assert "2026-10-28 08:00:00" not in page
-    assert "<strong>建立時間：</strong>" not in page
+    assert "<td>2026-10-28</td>" in page
+    assert "2026-10-28 00:00:00" not in page
+    assert "<th>總經過</th>" not in page
+    assert "<th>缺料時間</th>" not in page
+    assert "<th>人工暫停時間</th>" not in page
+    assert "每頁 25 台" in page
+    assert "下載 Excel" in page
+    assert 'class="manager-filter-actions"' in page
+    assert '>清除</a>' in page
+    assert 'href="/manager"' in page
+
+    detail_page = client.get(f"/manager?detail_id={order_a}&order_no=A001").get_data(as_text=True)
+    assert "<h2>訂單明細：A001</h2>" in detail_page
+    assert "基本資料" in detail_page
+    assert "時間與工時" in detail_page
+    assert "缺料／人工暫停紀錄" in detail_page
+    assert "<strong>校機建立日期：</strong>" not in detail_page
+
+
+def test_manager_report_is_paginated_to_25_rows_and_keeps_filters(client, app):
+    with app.app_context():
+        model_id = create_model("閱讀器分頁測試")
+        for number in range(26):
+            create_order(f"MANAGER-{number:02d}", model_id, f"M-{number:02d}")
+
+    first_page = client.get("/manager?model_name=閱讀器分頁測試").get_data(as_text=True)
+    assert "共 26 筆訂單；每頁 25 台，目前第 1／2 頁" in first_page
+    assert first_page.count("<tr>") == 26
+    assert "MANAGER-00" not in first_page
+    assert "page=2" in first_page
+
+    second_page = client.get("/manager?model_name=閱讀器分頁測試&page=2").get_data(as_text=True)
+    assert "共 26 筆訂單；每頁 25 台，目前第 2／2 頁" in second_page
+    assert second_page.count("<tr>") == 2
+    assert "MANAGER-00" in second_page
+
+
+def test_manager_report_sorts_rows_and_marks_open_due_dates(client, app):
+    with app.app_context():
+        model_id = create_model("閱讀器排序測試")
+        today = datetime.now(TAIPEI_TZ).date()
+        create_order("A-OVERDUE", model_id, "SORT-01", expected_ship_date=(today - timedelta(days=1)).isoformat())
+        create_order("B-DUE-TODAY", model_id, "SORT-02", expected_ship_date=today.isoformat())
+        create_order("Z-FUTURE", model_id, "SORT-03", expected_ship_date=(today + timedelta(days=1)).isoformat())
+        completed_id = create_order("Y-COMPLETED", model_id, "SORT-04", expected_ship_date=(today - timedelta(days=2)).isoformat())
+        get_db().execute("UPDATE inspection_order SET status='completed' WHERE id=?", (completed_id,))
+        get_db().commit()
+
+    order_number_page = client.get("/manager?model_name=閱讀器排序測試&sort_by=order_no_desc").get_data(as_text=True)
+    assert order_number_page.index("Z-FUTURE") < order_number_page.index("Y-COMPLETED") < order_number_page.index("B-DUE-TODAY") < order_number_page.index("A-OVERDUE")
+    assert 'value="order_no_desc" selected' in order_number_page
+
+    due_date_page = client.get("/manager?model_name=閱讀器排序測試&sort_by=expected_ship_date_asc").get_data(as_text=True)
+    assert due_date_page.index("Y-COMPLETED") < due_date_page.index("A-OVERDUE") < due_date_page.index("B-DUE-TODAY") < due_date_page.index("Z-FUTURE")
+    overdue_start = due_date_page.index("<td>A-OVERDUE</td>")
+    completed_start = due_date_page.index("<td>Y-COMPLETED</td>")
+    assert 'class="manager-row-overdue"' in due_date_page[overdue_start - 80:overdue_start]
+    assert "已逾期" in due_date_page[overdue_start:overdue_start + 500]
+    assert 'class="manager-row-due-today"' in due_date_page
+    assert "今日到期" in due_date_page
+    assert 'class="manager-row-overdue"' not in due_date_page[completed_start - 80:completed_start]
+
+    response = client.get("/manager/export?model_name=閱讀器排序測試&sort_by=order_no_desc")
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(response.data), data_only=True)
+    detail = workbook["訂單明細"]
+    assert [detail.cell(row=index, column=1).value for index in range(2, 6)] == ["Z-FUTURE", "Y-COMPLETED", "B-DUE-TODAY", "A-OVERDUE"]
+
+
+def test_manager_export_reuses_the_full_main_system_excel(client, app):
+    _, _, _, order_a, order_b = setup_data(app)
+    response = client.get("/manager/export?order_no=A00")
+
+    assert response.status_code == 200
+    assert "attachment" in response.headers["Content-Disposition"]
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(response.data), data_only=True)
+    assert workbook.sheetnames == ["未認領", "訂單明細", "軸別統計"]
+    summary = workbook["未認領"]
+    assert [cell.value for cell in summary[1]] == ["校機人員", "未認領", None, None]
+    assert [cell.value for cell in summary[2]] == ["四軸總台數", 2, "五軸總台數", 0]
+    assert [cell.value for cell in summary[4]] == ["軸別", "機型", "台數", None]
+    assert [cell.value for cell in summary[5]] == ["四軸", "HR-255", 2, None]
+    assert [cell.value for cell in summary[6]] == ["四軸小計", None, 2, None]
+    sheet = workbook["訂單明細"]
+    assert [cell.value for cell in sheet[1]] == [
+        "訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態",
+        "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "人工暫停時間", "實際校機工時", "重新檢驗原因",
+    ]
+    assert [sheet.cell(row=index, column=1).value for index in range(2, 4)] == ["A002", "A001"]
+    assert sheet.max_row == 3
+    assert order_a and order_b
+
+
+def test_excel_export_creates_a_person_sheet_per_worker_and_excludes_cancelled_rows(app, tmp_path):
+    with app.app_context():
+        four_axis_model = create_model("HR-255", "HR255")
+        five_axis_model = create_model("FHR-255CL", "FHR255")
+        four_axis_order = create_order("PERSON-4", four_axis_model, "E27-40")
+        five_axis_order = create_order("PERSON-5", five_axis_model, "F27-50")
+        cancelled_order = create_order("PERSON-CANCELLED", five_axis_model, "F27-51")
+        get_db().execute(
+            "UPDATE inspection_order SET worker_name_snapshot='黃信瑜' WHERE id IN (?,?,?)",
+            (four_axis_order, five_axis_order, cancelled_order),
+        )
+        get_db().execute("UPDATE inspection_order SET status='cancelled' WHERE id=?", (cancelled_order,))
+        get_db().commit()
+
+        output = tmp_path / "person-sheets.xlsx"
+        from app.services import export_xlsx
+
+        export_xlsx(query_report({}), output)
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(output, data_only=True)
+    assert workbook.sheetnames == ["黃信瑜", "訂單明細", "軸別統計"]
+    sheet = workbook["黃信瑜"]
+    assert [cell.value for cell in sheet[1]] == ["校機人員", "黃信瑜", None, None]
+    assert [cell.value for cell in sheet[2]] == ["四軸總台數", 1, "五軸總台數", 1]
+    assert [cell.value for cell in sheet[5]] == ["四軸", "HR-255", 1, None]
+    assert [cell.value for cell in sheet[7]] == ["五軸", "FHR-255CL", 1, None]
+    assert sheet["C8"].value == 1
 
 
 def test_manager_report_is_read_only(client):
@@ -324,7 +448,7 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
     assert "固定暫停條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V602.11.02</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V701.11.03</div>' in client.get("/").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
@@ -426,7 +550,7 @@ def test_material_shortage_pause_resume_and_net_work_time(client, app):
         db.commit()
         report_row = query_report({"order_no": "A001"})[0]
         assert report_row["material_pause_seconds"] == 1800
-        assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["material_pause_seconds"]) == "01:30:00"
+        assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["pause_intervals"]) == "01:30:00"
 
 
 def test_manual_pause_resume_excludes_time_from_actual_work_and_blocks_finish(client, app):
@@ -464,13 +588,28 @@ def test_manual_pause_resume_excludes_time_from_actual_work_and_blocks_finish(cl
         db.commit()
         report_row = query_report({"order_no": "A001"})[0]
         assert report_row["manual_pause_seconds"] == 3600
-        assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["material_pause_seconds"] + report_row["manual_pause_seconds"]) == "02:00:00"
+        assert format_work_duration(report_row["started_at"], report_row["finished_at"], report_row["pause_intervals"]) == "02:00:00"
 
 
-def test_work_duration_excludes_evenings_lunch_and_weekends():
+def test_work_duration_uses_weekday_overtime_and_weekend_scan_rules():
     assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-30T02:00:00+00:00") == "10:00:00"
-    assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-29T12:00:00+00:00") == "08:00:00"
+    assert format_work_duration("2026-10-29T00:00:00+00:00", "2026-10-29T12:00:00+00:00") == "10:30:00"
     assert format_work_duration("2026-10-30T00:00:00+00:00", "2026-11-02T02:00:00+00:00") == "10:00:00"
+    assert format_work_duration("2026-10-29T08:00:00+00:00", "2026-10-29T12:00:00+00:00") == "03:30:00"
+    assert format_work_duration("2026-10-31T01:00:00+00:00", "2026-10-31T12:00:00+00:00") == "09:30:00"
+    assert format_work_duration("2026-11-01T01:00:00+00:00", "2026-11-01T07:00:00+00:00") == "05:00:00"
+
+
+def test_work_duration_deducts_only_pause_time_inside_work_windows():
+    pause_intervals = [{
+        "paused_at": "2026-11-02T03:38:40+00:00",
+        "resumed_at": "2026-11-03T02:21:44+00:00",
+    }]
+    assert format_work_duration(
+        "2026-10-30T08:30:41+00:00",
+        "2026-11-03T02:21:44+00:00",
+        pause_intervals,
+    ) == "04:07:59"
 
 
 def test_material_barcodes_print_and_replenish_requires_open_pause(client, app):
