@@ -9,6 +9,7 @@ from config import Config
 from . import create_app
 from .automatic_backup import run_daily_auto_backup, verify_sqlite_file
 from .single_instance import SingleInstance
+from waitress import serve
 
 
 def system_url():
@@ -69,7 +70,7 @@ def main(single_instance=None, argv=None):
         application = create_app()
         if getattr(sys, "frozen", False):
             threading.Thread(target=open_browser, kwargs={"delay": 1}, daemon=True).start()
-        application.run(host=Config.HOST, port=Config.PORT, debug=False, use_reloader=False)
+        serve(application, host=Config.HOST, port=Config.PORT, threads=Config.WAITRESS_THREADS)
         return 0
     finally:
         instance.release()

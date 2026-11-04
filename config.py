@@ -25,4 +25,5 @@ class Config:
     HOST = os.environ.get("INSPECTION_HOST", "0.0.0.0")
     BROWSER_HOST = os.environ.get("INSPECTION_BROWSER_HOST", "127.0.0.1")
     PORT = int(os.environ.get("INSPECTION_PORT", "5000"))
+    WAITRESS_THREADS = int(os.environ.get("INSPECTION_WAITRESS_THREADS", "8"))
 

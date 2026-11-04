@@ -7,7 +7,7 @@ Windows 區域網路內使用的 Flask + SQLite 條碼報工系統。系統不�
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
+py -m pip install -r requirements-build.txt
 py app.py
 ```
 

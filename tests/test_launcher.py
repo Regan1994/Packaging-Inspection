@@ -82,14 +82,14 @@ def test_primary_instance_releases_mutex_after_server_stops(monkeypatch):
     run_arguments = {}
 
     class FakeApp:
-        def run(self, **kwargs):
-            run_arguments.update(kwargs)
+        pass
 
     monkeypatch.delattr(launcher.sys, "frozen", raising=False)
     monkeypatch.setattr(launcher, "create_app", FakeApp)
+    monkeypatch.setattr(launcher, "serve", lambda application, **kwargs: run_arguments.update(kwargs))
 
     assert launcher.main(lock) == 0
-    assert run_arguments == {"host": launcher.Config.HOST, "port": launcher.Config.PORT, "debug": False, "use_reloader": False}
+    assert run_arguments == {"host": launcher.Config.HOST, "port": launcher.Config.PORT, "threads": launcher.Config.WAITRESS_THREADS}
     assert lock.release_calls == 1
 
 
