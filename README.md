@@ -17,7 +17,7 @@ py app.py
 
 Windows 主機同一時間只允許一個主系統程序。重複啟動時，第二個程序不會建立 Flask 或開啟 SQLite，而是開啟既有系統網址並提示系統已在執行。
 
-主系統啟動後會依台北日期建立每日自動備份；同一天最多一份，只保留最近 30 份 `inspection_auto_*.db`。手動建立的 `inspection_backup_*.db` 不會被自動輪替刪除。自動備份失敗會寫入 `instance/app.log`，但不會阻止系統啟動。
+主系統啟動後會依台北日期建立每日自動備份；同一天最多一份，只保留最近 30 份 `inspection_auto_*.db`。主機長時間不重啟時，可由 Windows 工作排程每日執行 `InspectionReporting.exe --backup`。手動建立的 `inspection_backup_*.db` 不會被自動輪替刪除。自動備份失敗會寫入 `instance/app.log`，但不會阻止系統啟動。備份與還原操作詳見 `docs/backup-restore-runbook.md`。
 
 ## 測試
 

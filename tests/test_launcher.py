@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,50 @@ def test_second_instance_opens_existing_system_without_creating_app(monkeypatch)
     assert launcher.main(lock) == 0
     assert events == [("browser", 0), ("notice", 0)]
     assert lock.release_calls == 0
+
+
+def test_backup_command_does_not_acquire_application_mutex(monkeypatch, capsys):
+    lock = FakeSingleInstance(False)
+    events = []
+
+    class FakeContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class FakeApp:
+        config = {
+            "DATABASE": "C:/data/inspection.db",
+            "BACKUP_DIRECTORY": "C:/data/backups",
+            "AUTO_BACKUP_RETENTION": 30,
+        }
+        logger = type("Logger", (), {"info": lambda self, *args: events.append(args)})()
+
+        def app_context(self):
+            return FakeContext()
+
+    monkeypatch.setattr(launcher, "create_app", lambda config=None: FakeApp())
+    monkeypatch.setattr(
+        launcher,
+        "run_daily_auto_backup",
+        lambda database, backup_directory, retention: (Path("C:/data/backups/inspection_auto_test.db"), True),
+    )
+
+    assert launcher.main(lock, ["--backup"]) == 0
+    assert lock.release_calls == 0
+    assert "automatic database backup created" in capsys.readouterr().out
+    assert events
+
+
+def test_verify_backup_command_reports_success(monkeypatch, capsys):
+    verified = []
+    monkeypatch.setattr(launcher, "verify_sqlite_file", lambda path: verified.append(path) or path)
+
+    assert launcher.main(argv=["--verify-backup", "C:/data/backup.db"]) == 0
+    assert verified == [Path("C:/data/backup.db")]
+    assert "backup verification passed" in capsys.readouterr().out
 
 
 def test_primary_instance_releases_mutex_after_server_stops(monkeypatch):
