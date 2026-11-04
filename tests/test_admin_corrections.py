@@ -89,6 +89,47 @@ def test_admin_order_correction_requires_password_backs_up_and_audits(client, ap
         assert details["backup"].endswith(backups[0].name)
 
 
+def test_business_can_update_expected_ship_date_with_backup_and_audit(client, app):
+    _, _, order_id = setup_order(app)
+    with app.app_context():
+        get_db().execute("UPDATE inspection_order SET expected_ship_date=? WHERE id=?", ("2026-11-04", order_id))
+        get_db().commit()
+
+    rejected = client.post(
+        f"/orders/{order_id}/expected-ship-date",
+        data={"expected_ship_date": "2026-11-10", "reason": "調整客戶需求", "operator_name": "業務甲", "password": "wrong", "next": f"/orders/{order_id}/edit"},
+        follow_redirects=True,
+    )
+    assert "管理密碼錯誤" in rejected.get_data(as_text=True)
+    assert not list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
+
+    response = client.post(
+        f"/orders/{order_id}/expected-ship-date",
+        data={"expected_ship_date": "2026-11-10", "reason": "調整客戶需求", "operator_name": "業務甲", "password": "TJR", "next": f"/orders/{order_id}/edit"},
+    )
+    assert response.status_code == 302
+    backups = list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as backup:
+        assert backup.execute("SELECT expected_ship_date FROM inspection_order WHERE id=?", (order_id,)).fetchone()[0] == "2026-11-04"
+
+    with app.app_context():
+        assert get_order(order_id)["expected_ship_date"] == "2026-11-10"
+        audit = get_db().execute(
+            "SELECT * FROM inspection_audit_log WHERE action='admin_update_expected_ship_date' AND entity_id=?",
+            (str(order_id),),
+        ).fetchone()
+        details = json.loads(audit["details"])
+        assert audit["operator_name"] == "業務甲"
+        assert details["old"]["expected_ship_date"] == "2026-11-04"
+        assert details["new"]["expected_ship_date"] == "2026-11-10"
+        assert details["reason"] == "調整客戶需求"
+
+    page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
+    assert "修改需求日期" in page
+    assert 'value="2026-11-10"' in page
+
+
 def test_admin_can_add_and_correct_pause_without_allowing_overlap(client, app):
     worker_a, _, order_id = setup_order(app)
     client.post(f"/orders/{order_id}/admin-correct", data=correction_data(worker_a))

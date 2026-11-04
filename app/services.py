@@ -1445,6 +1445,54 @@ def create_order(order_no, model_id=None, machine_serial=None, customer_name="",
     return order_id
 
 
+def update_expected_ship_date(order_id, expected_ship_date, reason, operator_name, password, backup_dir):
+    reason, operator_name = _require_admin_correction(password, reason, operator_name)
+    raw_date = (expected_ship_date or "").strip()
+    new_date = raw_date or None
+    if new_date:
+        try:
+            datetime.strptime(new_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("需求日期格式不正確") from exc
+
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    old_date = order["expected_ship_date"]
+    if old_date == new_date:
+        raise ValueError("需求日期沒有變更")
+
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute("SELECT expected_ship_date FROM inspection_order WHERE id=?", (order_id,)).fetchone()
+        if not current or current["expected_ship_date"] != old_date:
+            raise ValueError("訂單資料已被其他操作更新，請重新開啟後再修改")
+        db.execute(
+            "UPDATE inspection_order SET expected_ship_date=?,updated_at=? WHERE id=?",
+            (new_date, utc_now(), order_id),
+        )
+        _inspection_audit(
+            "admin_update_expected_ship_date",
+            "inspection_order",
+            order_id,
+            {
+                "order_no": order["order_no"],
+                "old": {"expected_ship_date": old_date},
+                "new": {"expected_ship_date": new_date},
+                "reason": reason,
+                "backup": str(backup),
+            },
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
 def get_order(order_id):
     return get_db().execute(
         """

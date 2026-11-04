@@ -9,7 +9,7 @@ from flask import Blueprint, current_app, flash, jsonify, redirect, render_templ
 
 from .barcode import code128_svg
 from .db import get_db
-from .services import ASSEMBLY_STAGES, DEBUG_CLEAR_CHOICES, access_password_enabled, backup_database, change_access_password, clear_debug_data, correct_actual_qty, create_assembly_worker, create_batch, create_model, debug_clear_counts, delete_batch, delete_model, ensure_barcodes, export_xlsx, get_assembly_worker, get_batch, get_job, is_five_axis_model, list_assembly_workers, list_models, list_recent_batches, list_report_operators, parse_payload, query_report, restore_database, scan, set_access_password_enabled, set_assembly_worker_active, summarize_report_by_operator, update_model, verify_access_password
+from .services import ASSEMBLY_STAGES, DEBUG_CLEAR_CHOICES, access_password_enabled, backup_database, change_access_password, clear_debug_data, correct_actual_qty, create_assembly_worker, create_batch, create_model, debug_clear_counts, delete_batch, delete_model, ensure_barcodes, export_xlsx, get_assembly_worker, get_batch, get_job, is_five_axis_model, list_assembly_workers, list_models, list_recent_batches, list_report_operators, parse_payload, query_report, restore_database, scan, set_access_password_enabled, set_assembly_worker_active, summarize_report_by_operator, update_expected_ship_date, update_model, verify_access_password
 from .services import create_packing_worker, delete_packing_worker, get_packing_worker, list_packing_workers, packing_scan, set_packing_worker_active, update_packing_worker
 
 bp = Blueprint("main", __name__)
@@ -26,6 +26,7 @@ PROTECTED_ENDPOINTS = {
     "main.batch_delete",
     "main.reports",
     "main.reports_export",
+    "main.order_expected_ship_date_update",
     "main.quantity_update",
     "main.settings",
     "main.change_password",
@@ -636,6 +637,10 @@ def order_edit(order_id):
     return render_template(
         "inspection_order_edit.html",
         order=order,
+        detail=order,
+        detail_pause_intervals=material_pauses + manual_pauses,
+        detail_back_url=url_for("main.reports"),
+        detail_back_label="返回訂單明細",
         material_pauses=material_pauses,
         manual_pauses=manual_pauses,
         pause_intervals=material_pauses + manual_pauses,
@@ -648,6 +653,24 @@ def order_edit(order_id):
         delete_next=url_for("main.reports"),
         edit_next=url_for("main.order_edit", order_id=order_id),
     )
+
+
+@bp.post("/orders/<int:order_id>/expected-ship-date")
+def order_expected_ship_date_update(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = update_expected_ship_date(
+            order_id,
+            request.form.get("expected_ship_date"),
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"需求日期已修改；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有修改需求日期：{exc}", "error")
+    return redirect(next_path)
 
 
 @bp.post("/orders/<int:order_id>/manual-start")
@@ -973,6 +996,8 @@ def manager():
         material_pauses=material_pauses,
         manual_pauses=manual_pauses,
         detail_pause_intervals=material_pauses + manual_pauses,
+        detail_back_url=url_for("main.manager", **query_args),
+        detail_back_label="返回查詢結果",
     )
 
 

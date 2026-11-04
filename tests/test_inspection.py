@@ -366,6 +366,10 @@ def test_report_detail_opens_order_actions_and_cancel_is_available(client, app):
     assert f"/orders/{order_a}/edit" in page
 
     edit = client.get(f"/orders/{order_a}/edit").get_data(as_text=True)
+    assert "<h2>訂單明細：A001</h2>" in edit
+    assert "基本資料" in edit
+    assert "時間與工時" in edit
+    assert "缺料／人工暫停紀錄" in edit
     assert "列印 Code" in edit
     assert "取消訂單" in edit
     assert "刪除訂單" in edit

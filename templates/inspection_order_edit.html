@@ -1,21 +1,9 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>編輯訂單</h1>
+<h1>訂單明細</h1>
+{% include "_order_detail_view.html" %}
 <section class="panel">
-  <h2>{{ order.order_no }}</h2>
-  <div class="grid two">
-    <p><strong>機型：</strong>{{ order.model_name_snapshot }}</p>
-    <p><strong>軸別：</strong>{{ '五軸' if order.axis_type_snapshot == '5' else '四軸' }}</p>
-    <p><strong>機台製號：</strong>{{ order.machine_serial }}</p>
-    <p><strong>客戶：</strong>{{ order.customer_name or '-' }}</p>
-    <p><strong>校機人員：</strong>{{ order.worker_name_snapshot or '未認領' }}</p>
-    <p><strong>狀態：</strong>{{ '缺料暫停' if order.material_paused else ('人工暫停' if order.manual_paused else status_label(order.status)) }}</p>
-    <p><strong>開始日期時間：</strong>{{ format_datetime(order.started_at) }}</p>
-    <p><strong>結束日期時間：</strong>{{ format_datetime(order.finished_at) }}</p>
-    <p><strong>缺料總時間：</strong>{{ format_seconds(order.material_pause_seconds) }}</p>
-    <p><strong>人工暫停時間：</strong>{{ format_seconds(order.manual_pause_seconds) }}</p>
-    <p><strong>實際校機工時：</strong>{{ format_work_duration(order.started_at, order.finished_at, pause_intervals) }}</p>
-  </div>
+  <h2>訂單操作</h2>
   <div class="row">
     <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>
     {% if order.status == 'pending' %}
@@ -26,6 +14,20 @@
     {% endif %}
     <a class="button" href="{{ url_for('main.reports') }}">返回訂單明細</a>
   </div>
+</section>
+<section class="panel">
+  <h2>修改需求日期</h2>
+  <p class="muted">業務可在此修改需求日期（預計出貨日）。每次修改都會先備份資料庫，並保留修改前後日期、修改人與原因；日期留白表示清除需求日期。</p>
+  <form method="post" action="{{ url_for('main.order_expected_ship_date_update', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定修改這筆訂單的需求日期？');">
+    <div class="grid two">
+      <label>需求日期（預計出貨日）<input type="date" name="expected_ship_date" value="{{ order.expected_ship_date or '' }}"></label>
+      <label>修改人<input name="operator_name" maxlength="80" required></label>
+    </div>
+    <label>修改原因<input name="reason" maxlength="200" required></label>
+    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
+    <input type="hidden" name="next" value="{{ edit_next }}">
+    <button class="button primary">確認修改需求日期</button>
+  </form>
 </section>
 {% if order.status == 'pending' %}
 <section class="panel">
@@ -42,15 +44,6 @@
     <input type="hidden" name="next" value="{{ edit_next }}">
     <button class="button primary">補登開始</button>
   </form>
-</section>
-{% endif %}
-{% if material_pauses or manual_pauses %}
-<section class="panel table-wrap">
-  <h2>缺料／人工暫停紀錄</h2>
-  <table><tr><th>類型</th><th>開始時間</th><th>恢復時間</th><th>登記人</th><th>恢復人</th><th>暫停時長</th></tr>
-    {% for pause in material_pauses %}<tr><td>缺料</td><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未補料' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}
-    {% for pause in manual_pauses %}<tr><td>人工暫停</td><td>{{ format_datetime(pause.paused_at) }}</td><td>{{ format_datetime(pause.resumed_at) if pause.resumed_at else '尚未恢復' }}</td><td>{{ pause.paused_by_name or '-' }}</td><td>{{ pause.resumed_by_name or '-' }}</td><td>{{ format_seconds(pause.duration_seconds) }}</td></tr>{% endfor %}
-  </table>
 </section>
 {% endif %}
 {% if order.status != 'cancelled' %}
