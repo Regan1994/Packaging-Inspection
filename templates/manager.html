@@ -41,6 +41,10 @@
           <div class="manager-detail-field"><span>預計出貨日</span><strong>{{ detail.expected_ship_date or '-' }}</strong></div>
           <div class="manager-detail-field"><span>校機人員</span><strong>{{ detail.worker_name_snapshot or '未認領' }}</strong></div>
           <div class="manager-detail-field"><span>目前狀態</span><strong>{% if detail.status == 'started' and detail.material_paused %}缺料暫停{% elif detail.status == 'started' and detail.manual_paused %}人工暫停{% else %}{{ status_label(detail.status) }}{% endif %}</strong></div>
+          <div class="manager-detail-field"><span>包裝進度</span><strong>{{ packing_status_label(detail.packing_status) }}</strong></div>
+          <div class="manager-detail-field"><span>包裝人員</span><strong>{{ detail.packing_worker_name_snapshot or '-' }}</strong></div>
+          <div class="manager-detail-field"><span>包裝開始</span><strong>{{ format_datetime(detail.packing_started_at) }}</strong></div>
+          <div class="manager-detail-field"><span>包裝完成</span><strong>{{ format_datetime(detail.packing_finished_at) }}</strong></div>
           <div class="manager-detail-field"><span>校機建立日期</span><strong>{{ format_date(detail.created_at) }}</strong></div>
           {% if detail.reinspection_reason %}<div class="manager-detail-field manager-detail-field-wide"><span>重新檢驗原因</span><strong>{{ detail.reinspection_reason }}</strong></div>{% endif %}
         </div>
@@ -116,22 +120,22 @@
       <h2>訂單查詢結果</h2>
       <p class="muted">共 {{ total_rows }} 筆訂單；每頁 25 台，目前第 {{ current_page }}／{{ total_pages }} 頁。下載 Excel 會包含目前篩選條件下的全部結果。</p>
       <table class="report-detail-table manager-report-table">
-        <tr><th>訂單</th><th>校機建立日期</th><th>預計出貨日</th><th>機型</th><th>機台製號</th><th>客戶</th><th>校機人員</th><th>目前狀態</th><th>開始日期</th><th>開始時間</th><th>結束日期</th><th>結束時間</th><th>實際工時</th><th>明細</th></tr>
+        <tr><th>訂單號碼</th><th>校機建立日期</th><th>預計出貨日</th><th>機型</th><th>機台製號</th><th>客戶</th><th>校機狀態</th><th>校機人員</th><th>開始日期</th><th>結束日期</th><th>總時間</th><th>實際工時</th><th>包裝進度</th><th>操作</th></tr>
         {% for row in rows %}
         <tr{% if row.is_overdue %} class="manager-row-overdue"{% elif row.is_due_today %} class="manager-row-due-today"{% endif %}>
-          <td>{{ row.order_no }}</td>
+          <td>{{ row.order_no }}{% if row.is_overdue %}<small class="manager-deadline-label overdue">已逾期</small>{% elif row.is_due_today %}<small class="manager-deadline-label due-today">今日到期</small>{% endif %}</td>
           <td>{{ format_date(row.created_at) }}</td>
-          <td>{{ row.expected_ship_date or '-' }}{% if row.is_overdue %}<small class="manager-deadline-label overdue">已逾期</small>{% elif row.is_due_today %}<small class="manager-deadline-label due-today">今日到期</small>{% endif %}</td>
+          <td>{{ row.expected_ship_date or '-' }}</td>
           <td>{{ row.model_name_snapshot }}</td>
           <td>{{ row.machine_serial }}</td>
           <td>{{ row.customer_name or '-' }}</td>
-          <td>{{ row.worker_name_snapshot or '未認領' }}</td>
           <td>{% if row.status == 'started' and row.material_paused %}缺料暫停{% elif row.status == 'started' and row.manual_paused %}人工暫停{% else %}{{ status_label(row.status) }}{% endif %}</td>
+          <td>{{ row.worker_name_snapshot or '未認領' }}</td>
           <td>{{ format_date(row.started_at) }}</td>
-          <td>{{ format_time(row.started_at) }}</td>
           <td>{{ format_date(row.finished_at) }}</td>
-          <td>{{ format_time(row.finished_at) }}</td>
+          <td>{{ format_duration(row.started_at, row.finished_at, row.status) }}</td>
           <td>{{ format_work_duration(row.started_at, row.finished_at, row.pause_intervals) }}</td>
+          <td>{{ packing_status_label(row.packing_status) }}</td>
           <td><a class="button small" href="{{ url_for('main.manager', detail_id=row.id, **query_args) }}">查看明細</a></td>
         </tr>
         {% else %}

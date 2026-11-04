@@ -606,7 +606,11 @@ def test_dashboard_status_cards_and_report_duration(client, app):
         assert format_duration("2026-10-16T08:00:00+00:00", "2026-10-17T09:05:06+00:00", "finished") == "1日 01:05:06"
         assert format_datetime("2026-10-19T03:15:20+00:00") == "2026-10-19 11:15:20"
 
-    home = client.get("/")
+    portal = client.get("/")
+    assert portal.status_code == 200
+    assert "校機系統" in portal.get_data(as_text=True)
+    assert "包裝系統" in portal.get_data(as_text=True)
+    home = client.get("/inspection")
     assert home.status_code == 200
     assert b"href=\"/reports?status_group=incomplete\"" in home.data
     home_text = home.get_data(as_text=True)

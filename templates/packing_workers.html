@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block body_class %}packing-theme{% endblock %}
+{% block content %}
+<div class="page-utility-bar" aria-label="包裝管理設定"><span>管理設定</span><a class="page-utility-link" href="{{ url_for('main.packing_workers') }}">人員設定</a></div>
+<h1>包裝人員</h1>
+<p><a class="button small" href="{{ url_for('main.packing_scan_page') }}">返回掃描條碼</a></p>
+<div class="grid">
+  <section class="panel"><h2>新增包裝人員</h2><form method="post"><label>員工編號<input name="employee_no" required maxlength="4"></label><label>姓名<input name="name" required maxlength="4"></label><button class="button primary">新增並產生條碼</button></form></section>
+  <section class="panel table-wrap">
+    <h2>人員清單</h2>
+    <p class="muted">停用只會禁止新的包裝掃描，既有包裝紀錄不會被刪除；已有包裝紀錄的人員不能刪除。</p>
+    <form id="packing-worker-print-form" method="get" action="{{ url_for('main.packing_worker_print') }}"></form>
+    <table>
+      <tr><th></th><th>員工編號</th><th>姓名</th><th>狀態</th><th>條碼</th><th>操作</th></tr>
+      {% for worker in workers %}
+      {% set update_form_id = 'packing-worker-update-' ~ worker.id %}
+      <tr>
+        <td><input form="packing-worker-print-form" type="checkbox" name="ids" value="{{ worker.id }}"></td>
+        <td><form id="{{ update_form_id }}" method="post" action="{{ url_for('main.packing_worker_update', worker_id=worker.id) }}"></form><input form="{{ update_form_id }}" class="worker-number-input" name="employee_no" value="{{ worker.employee_no }}" required maxlength="4"></td>
+        <td><input form="{{ update_form_id }}" class="worker-name-input" name="name" value="{{ worker.name }}" required maxlength="4" size="4"></td>
+        <td>{{ '啟用' if worker.is_active else '停用' }}</td>
+        <td><code>{{ worker.barcode }}</code></td>
+        <td><div class="worker-actions"><button form="{{ update_form_id }}" class="button small">保存</button><form method="post" action="{{ url_for('main.packing_worker_status', worker_id=worker.id) }}" class="inline"><button name="is_active" value="{{ 0 if worker.is_active else 1 }}" class="button small">{{ '停用' if worker.is_active else '重新啟用' }}</button></form><a class="button small" href="{{ url_for('main.packing_worker_print', ids=worker.id) }}">列印</a><form method="post" action="{{ url_for('main.packing_worker_delete', worker_id=worker.id) }}" class="inline" onsubmit="return confirm('確定刪除這位包裝人員？系統會先備份資料庫；已有包裝紀錄的人員不能刪除。');"><input type="hidden" name="expected_employee_no" value="{{ worker.employee_no }}"><input type="hidden" name="confirmation" value="刪除"><button class="button small danger">刪除</button></form></div></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">尚未建立包裝人員</td></tr>
+      {% endfor %}
+    </table>
+    <p><button form="packing-worker-print-form" class="button primary">列印勾選條碼</button></p>
+  </section>
+</div>
+{% endblock %}

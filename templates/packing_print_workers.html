@@ -1,0 +1,5 @@
+{% extends 'base.html' %}
+{% block body_class %}packing-theme{% endblock %}
+{% block header_nav %}<a href="{{ url_for('main.index') }}">系統首頁</a><a href="{{ url_for('main.packing_workers') }}">返回人員設定</a><span class="topbar-management-label">管理設定</span><a class="topbar-management-link" href="{{ url_for('main.packing_workers') }}">人員設定</a>{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='print-label.css') }}">{% endblock %}
+{% block content %}<div class="print-toolbar"><h1>包裝人員條碼</h1><button class="button primary" onclick="window.print()">列印</button></div><section class="print-sheet">{% for worker in workers %}<article class="thermal-label worker-label"><div class="thermal-heading"><div class="thermal-model-line"><strong>{{ worker.name }}</strong><span class="thermal-count">{{ worker.employee_no }}</span></div></div><div class="thermal-barcodes"><div class="barcode-card"><h3>包裝員工條碼</h3><div class="barcode">{{ code128_svg(worker.barcode)|safe }}</div></div></div></article>{% else %}<p>請先選擇人員。</p>{% endfor %}</section>{% endblock %}

@@ -20,6 +20,7 @@ STATUS_LABELS = {
     "finished": "已完成",
     "cancelled": "已取消",
 }
+PACKING_STATUS_LABELS = {"pending": "未開始", "started": "包裝中", "completed": "包裝完成"}
 MODEL_SERIAL_PREFIXES = {"HR255": "E", "RC255": "ER", "AR210": "C", "AR170": "B", "RC210": "CR"}
 ASSEMBLY_STAGES = ("旋", "傾", "尾", "組")
 ASSEMBLY_STAGE_CODES = {"旋": "R", "傾": "T", "尾": "B", "組": "A"}
@@ -63,6 +64,10 @@ def new_id():
 
 def status_label(status):
     return STATUS_LABELS.get(status, status or "-")
+
+
+def packing_status_label(status):
+    return PACKING_STATUS_LABELS.get(status, status or "-")
 
 
 def assembly_stage_label(stage):
@@ -1312,6 +1317,88 @@ def _active_worker(worker_id):
     return get_db().execute("SELECT * FROM inspection_worker WHERE id=? AND is_active=1", (worker_id,)).fetchone()
 
 
+def _compact_packing_worker_barcode(worker_id):
+    parts = ["PW1", f"{int(worker_id):08X}"]
+    return "".join(parts) + checksum_for(parts)[:4]
+
+
+def list_packing_workers(active_only=False):
+    sql = "SELECT * FROM packing_worker"
+    if active_only:
+        sql += " WHERE is_active=1"
+    return get_db().execute(sql + " ORDER BY employee_no COLLATE NOCASE").fetchall()
+
+
+def get_packing_worker(worker_id):
+    return get_db().execute("SELECT * FROM packing_worker WHERE id=?", (worker_id,)).fetchone()
+
+
+def _active_packing_worker(worker_id):
+    return get_db().execute("SELECT * FROM packing_worker WHERE id=? AND is_active=1", (worker_id,)).fetchone()
+
+
+def create_packing_worker(employee_no, name, changed_by="admin"):
+    employee_no = _inspection_code(employee_no, "員工編號")
+    if len(employee_no) > 4:
+        raise ValueError("員工編號最多四碼")
+    name = _inspection_text(name, "員工姓名")
+    db = get_db()
+    try:
+        cur = db.execute(
+            "INSERT INTO packing_worker(employee_no,name,barcode,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (employee_no, name, "TMP-" + _inspection_id(), utc_now(), utc_now()),
+        )
+        db.execute("UPDATE packing_worker SET barcode=? WHERE id=?", (_compact_packing_worker_barcode(cur.lastrowid), cur.lastrowid))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("包裝員工編號或條碼已存在") from exc
+    _inspection_audit("create", "packing_worker", cur.lastrowid, {"employee_no": employee_no, "name": name}, changed_by)
+    db.commit()
+    return cur.lastrowid
+
+
+def update_packing_worker(worker_id, employee_no, name, changed_by="admin"):
+    employee_no = _inspection_code(employee_no, "員工編號")
+    if len(employee_no) > 4:
+        raise ValueError("員工編號最多四碼")
+    name = _inspection_text(name, "員工姓名")
+    db = get_db()
+    worker = get_packing_worker(worker_id)
+    if not worker:
+        raise ValueError("找不到包裝人員")
+    try:
+        db.execute("UPDATE packing_worker SET employee_no=?,name=?,updated_at=? WHERE id=?", (employee_no, name, utc_now(), worker_id))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("包裝員工編號已存在") from exc
+    _inspection_audit("update", "packing_worker", worker_id, {"employee_no": employee_no, "name": name}, changed_by)
+    db.commit()
+
+
+def set_packing_worker_active(worker_id, is_active, changed_by="admin"):
+    db = get_db()
+    worker = get_packing_worker(worker_id)
+    if not worker:
+        raise ValueError("找不到包裝人員")
+    db.execute("UPDATE packing_worker SET is_active=?,updated_at=? WHERE id=?", (int(bool(is_active)), utc_now(), worker_id))
+    _inspection_audit("update", "packing_worker", worker_id, {"employee_no": worker["employee_no"], "is_active": bool(is_active)}, changed_by)
+    db.commit()
+
+
+def delete_packing_worker(worker_id, expected_employee_no, confirmation, backup_dir, changed_by="admin"):
+    if confirmation != "刪除":
+        raise ValueError("請輸入「刪除」確認")
+    db = get_db()
+    worker = get_packing_worker(worker_id)
+    if not worker or worker["employee_no"] != (expected_employee_no or "").strip():
+        raise ValueError("人員不存在或員工編號已變更")
+    if db.execute("SELECT 1 FROM inspection_order WHERE packing_worker_id=? LIMIT 1", (worker_id,)).fetchone():
+        raise ValueError("此人員已有包裝紀錄，不能刪除；請改用停用")
+    backup = backup_database(backup_dir)
+    db.execute("DELETE FROM packing_worker WHERE id=?", (worker_id,))
+    _inspection_audit("delete", "packing_worker", worker_id, {"employee_no": worker["employee_no"], "name": worker["name"], "backup": str(backup)}, changed_by)
+    db.commit()
+    return backup
+
+
 def create_order(order_no, model_id=None, machine_serial=None, customer_name="", expected_ship_date="", reinspection_reason="", created_by="admin", model_name=None, axis_type="4"):
     order_no = _inspection_code(order_no, "訂單號碼")
     machine_serial = _inspection_code(machine_serial, "機台製號")
@@ -1530,7 +1617,7 @@ def normalize_scanned_payload(payload):
     if any(
         re.fullmatch(pattern, upper)
         for pattern in (
-            r"IW1[0-9A-F]{12}",
+            r"I[WP]1[0-9A-F]{12}",
             r"I[SF][0-9A-Z]{10}",
             r"I1[SF][0-9A-F]{12}",
             r"IM1[SR][0-9A-F]{4}",
@@ -1541,8 +1628,8 @@ def normalize_scanned_payload(payload):
     return raw
 
 
-def _record_scan(event_id, payload, barcode_type, order_id, employee_no, result, message, scanned_at):
-    get_db().execute("INSERT INTO inspection_scan_event(event_id,payload,barcode_type,order_id,employee_no,result,message,scanned_at) VALUES(?,?,?,?,?,?,?,?)", (event_id, payload, barcode_type, order_id, employee_no, result, message, scanned_at))
+def _record_scan(event_id, payload, barcode_type, order_id, employee_no, result, message, scanned_at, process_stage="inspection"):
+    get_db().execute("INSERT INTO inspection_scan_event(event_id,payload,barcode_type,order_id,employee_no,result,message,process_stage,scanned_at) VALUES(?,?,?,?,?,?,?,?,?)", (event_id, payload, barcode_type, order_id, employee_no, result, message, process_stage, scanned_at))
 
 
 def _active_material_pause(db, order_id):
@@ -1843,6 +1930,104 @@ def scan(payload, worker_id=None, operator_name="scanner", pending_material_acti
     _record_scan(event_id, payload, recorded_type, order["id"] if order else None, employee_no, result, message, scanned_at)
     db.commit()
     return {"event_id": event_id, "result": result, "message": message, "scanned_at": scanned_at, "scan_kind": "order", "clear_worker": True, "clear_material_action": True, "clear_pause_action": True, "order_no": order["order_no"] if order else parsed.get("order_no", ""), "barcode_type": recorded_type}
+
+
+def packing_scan(payload, worker_id=None):
+    """Process packing scans using the existing inspection START and FINISH labels."""
+    db = get_db()
+    payload = normalize_scanned_payload(payload)
+    event_id, scanned_at = _inspection_id(), utc_now()
+    worker = db.execute("SELECT * FROM packing_worker WHERE barcode=? COLLATE NOCASE", (payload,)).fetchone()
+    if worker:
+        if not worker["is_active"]:
+            message = "此包裝人員已停用，不能進行包裝"
+            _record_scan(event_id, payload, "EMPLOYEE", None, worker["employee_no"], "invalid", message, scanned_at, "packing")
+            db.commit()
+            return {"event_id": event_id, "result": "invalid", "message": message, "scanned_at": scanned_at, "scan_kind": "employee"}
+        message = f"已辨識：{worker['name']}（{worker['employee_no']}），請掃描訂單 START 或 FINISH"
+        _record_scan(event_id, payload, "EMPLOYEE", None, worker["employee_no"], "success", message, scanned_at, "packing")
+        db.commit()
+        return {"event_id": event_id, "result": "success", "message": message, "scanned_at": scanned_at, "scan_kind": "employee", "worker_id": worker["id"], "employee_no": worker["employee_no"], "worker_name": worker["name"]}
+
+    current_worker = _active_packing_worker(worker_id) if worker_id else None
+    employee_no = current_worker["employee_no"] if current_worker else None
+    stored_barcode = db.execute(
+        """
+        SELECT o.*, b.barcode_type AS scanned_barcode_type
+        FROM inspection_barcode_record b
+        JOIN inspection_order o ON o.id=b.order_id
+        WHERE b.payload=? COLLATE NOCASE
+        """,
+        (payload,),
+    ).fetchone()
+    if stored_barcode:
+        order = stored_barcode
+        parsed = {"type": stored_barcode["scanned_barcode_type"], "order_id": stored_barcode["id"]}
+    else:
+        try:
+            parsed = parse_order_payload(payload)
+        except ValueError:
+            message = "無法辨識條碼，請掃描包裝員工或既有訂單 START／FINISH 條碼"
+            _record_scan(event_id, payload, None, None, employee_no, "invalid", message, scanned_at, "packing")
+            db.commit()
+            return {"event_id": event_id, "result": "invalid", "message": message, "scanned_at": scanned_at, "scan_kind": "unknown"}
+        order = db.execute(
+            "SELECT * FROM inspection_order WHERE id=?" if parsed.get("order_id") else "SELECT * FROM inspection_order WHERE order_no=? COLLATE NOCASE",
+            (parsed["order_id"],) if parsed.get("order_id") else (parsed["order_no"],),
+        ).fetchone()
+
+    result, message = "invalid", ""
+    if not current_worker:
+        message = "請先掃描有效且啟用中的包裝員工條碼"
+    elif not order:
+        message = "找不到相符的訂單"
+    elif order["status"] != "completed":
+        message = "校機尚未完成，不能開始包裝"
+    elif parsed["type"] == "START":
+        if order["packing_status"] == "pending":
+            updated = db.execute(
+                """
+                UPDATE inspection_order
+                SET packing_status='started',packing_worker_id=?,packing_worker_no_snapshot=?,packing_worker_name_snapshot=?,packing_started_at=?,updated_at=?
+                WHERE id=? AND status='completed' AND packing_status='pending'
+                """,
+                (current_worker["id"], current_worker["employee_no"], current_worker["name"], scanned_at, scanned_at, order["id"]),
+            ).rowcount
+            if updated:
+                result, message = "success", f"包裝 START 成功：{order['order_no']} 已由 {current_worker['name']} 開始"
+                _inspection_audit("packing_start", "inspection_order", order["id"], {"order_no": order["order_no"], "employee_no": current_worker["employee_no"]}, current_worker["name"])
+            else:
+                message = "包裝狀態已變更，請重新掃描"
+        elif order["packing_status"] == "started" and order["packing_worker_id"] == current_worker["id"]:
+            result, message = "duplicate", "此訂單已由你開始包裝"
+        elif order["packing_status"] == "started":
+            message = "此訂單已由其他包裝人員開始"
+        else:
+            result, message = "duplicate", "此訂單已完成包裝"
+    else:
+        if order["packing_status"] == "pending":
+            message = "必須先掃描訂單 START 開始包裝"
+        elif order["packing_status"] == "completed":
+            result, message = "duplicate", "此訂單已完成包裝 FINISH"
+        elif order["packing_worker_id"] != current_worker["id"]:
+            message = "只有開始包裝的原人員可以 FINISH"
+        else:
+            updated = db.execute(
+                """
+                UPDATE inspection_order
+                SET packing_status='completed',packing_finished_at=?,updated_at=?
+                WHERE id=? AND status='completed' AND packing_status='started' AND packing_worker_id=?
+                """,
+                (scanned_at, scanned_at, order["id"], current_worker["id"]),
+            ).rowcount
+            if updated:
+                result, message = "success", f"包裝 FINISH 成功：{order['order_no']}"
+                _inspection_audit("packing_finish", "inspection_order", order["id"], {"order_no": order["order_no"], "employee_no": current_worker["employee_no"]}, current_worker["name"])
+            else:
+                message = "包裝狀態已變更，請重新掃描"
+    _record_scan(event_id, payload, parsed.get("type"), order["id"] if order else None, employee_no, result, message, scanned_at, "packing")
+    db.commit()
+    return {"event_id": event_id, "result": result, "message": message, "scanned_at": scanned_at, "scan_kind": "order", "clear_worker": True, "order_no": order["order_no"] if order else parsed.get("order_no", ""), "barcode_type": parsed.get("type")}
 
 
 def cancel_order(order_id, cancelled_by="admin"):
@@ -2485,14 +2670,14 @@ def export_xlsx(rows, path):
                 cell.fill = axis_fills[axis_type]
         sheet.freeze_panes = "A5"
 
-    headers = ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態", "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "人工暫停時間", "實際校機工時", "重新檢驗原因"]
+    headers = ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "校機建立時間", "預計出貨日期", "校機狀態", "校機人員", "開始日期", "開始時間", "結束日期", "結束時間", "缺料時間", "人工暫停時間", "實際校機時間", "重檢原因", None, "包裝進度", "包裝人員", "包裝開始日期", "包裝開始時間", "包裝結束日期", "包裝結束時間"]
     detail.append(headers)
     for cell in detail[1]:
         cell.font = Font(bold=True)
 
     for row in rows:
         displayed_status = "缺料暫停" if row["material_paused"] else ("人工暫停" if row["manual_paused"] else status_label(row["status"]))
-        detail.append([excel_value(value) for value in [row["order_no"], row["model_name_snapshot"], axis_type_label(row["axis_type_snapshot"]), row["machine_serial"], row["customer_name"], row["expected_ship_date"] or "", row["worker_name_snapshot"] or "", format_datetime(row["created_at"]), displayed_status, format_date(row["started_at"]), format_time(row["started_at"]), format_date(row["finished_at"]), format_time(row["finished_at"]), format_duration(row["started_at"], row["finished_at"], row["status"]), format_seconds(row["material_pause_seconds"]), format_seconds(row["manual_pause_seconds"]), format_work_duration(row["started_at"], row["finished_at"], row["pause_intervals"]), row["reinspection_reason"]]])
+        detail.append([excel_value(value) for value in [row["order_no"], row["model_name_snapshot"], axis_type_label(row["axis_type_snapshot"]), row["machine_serial"], row["customer_name"], format_date(row["created_at"]), row["expected_ship_date"] or "", displayed_status, row["worker_name_snapshot"] or "", format_date(row["started_at"]), format_time(row["started_at"]), format_date(row["finished_at"]), format_time(row["finished_at"]), format_seconds(row["material_pause_seconds"]), format_seconds(row["manual_pause_seconds"]), format_work_duration(row["started_at"], row["finished_at"], row["pause_intervals"]), row["reinspection_reason"], None, packing_status_label(row["packing_status"]), row["packing_worker_name_snapshot"] or "", format_date(row["packing_started_at"]), format_time(row["packing_started_at"]), format_date(row["packing_finished_at"]), format_time(row["packing_finished_at"])]])
     axis_sheet = workbook.create_sheet("軸別統計")
     axis_sheet.append(["軸別", "訂單數", "已完成", "校機中", "缺料暫停", "待校機", "已取消"])
     for cell in axis_sheet[1]:

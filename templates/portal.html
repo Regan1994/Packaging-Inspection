@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block body_class %}portal-theme{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='home.css') }}">{% endblock %}
+{% block header_nav %}{% endblock %}
+{% block content %}
+<section class="system-portal" aria-labelledby="portal-title">
+  <div class="portal-heading">
+    <p class="eyebrow">TJR PRODUCTION</p>
+    <h1 id="portal-title">請選擇系統</h1>
+    <p>依工作內容進入對應系統。</p>
+  </div>
+  <div class="system-choices">
+    <a class="system-choice inspection-choice" href="{{ url_for('main.inspection_home') }}">
+      <span class="system-choice-kicker">校機系統</span>
+      <strong>校機作業</strong>
+      <span>建立訂單、校機掃描、查詢與人員管理</span>
+      <b>進入校機系統 →</b>
+    </a>
+    <a class="system-choice packing-choice" href="{{ url_for('main.packing_scan_page') }}">
+      <span class="system-choice-kicker">包裝系統</span>
+      <strong>包裝掃描</strong>
+      <span>掃描員工與訂單條碼，開始或完成包裝</span>
+      <b>進入包裝系統 →</b>
+    </a>
+  </div>
+</section>
+{% endblock %}

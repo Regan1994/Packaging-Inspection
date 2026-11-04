@@ -151,23 +151,28 @@ def test_report_drops_date_filters_and_can_delete_pending_order(client, app):
     assert list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
 
 
-def test_report_uses_full_width_layout_and_separate_date_time_columns(client, app):
+def test_report_uses_the_requested_14_columns(client, app):
     page = client.get("/reports").get_data(as_text=True)
 
     assert '<main class="container report-container">' in page
     assert 'class="report-detail-table"' in page
     assert '<select name="axis_type">' in page
     detail_section = page.split("<h2>訂單明細</h2>", 1)[1]
-    assert "<th>校機建立日期</th>" in detail_section
-    assert "<th>軸別</th>" not in detail_section
-    for heading in ("開始日期", "開始時間", "結束日期", "結束時間"):
-        assert f"<th>{heading}</th>" in page
-    assert "<th>開始</th>" not in page
-    assert "<th>完成</th>" not in page
+    expected_headers = [
+        "訂單號碼", "校機建立日期", "預計出貨日", "機型", "機台製號", "客戶",
+        "校機狀態", "校機人員", "開始日期", "結束日期", "總時間", "實際工時",
+        "包裝進度", "操作",
+    ]
+    table = detail_section.split("</table>", 1)[0]
+    positions = [table.index(f"<th>{heading}</th>") for heading in expected_headers]
+    assert positions == sorted(positions)
+    assert "<th>軸別</th>" not in table
+    for heading in ("包裝人員", "包裝開始", "包裝完成", "開始時間", "結束時間", "總經過", "缺料時間", "人工暫停時間"):
+        assert f"<th>{heading}</th>" not in table
     assert "完成率" not in page
 
 
-def test_manager_report_uses_requested_columns_and_creation_date_only(client, app):
+def test_manager_report_uses_the_same_requested_14_columns(client, app):
     _, _, _, order_a, _ = setup_data(app)
     with app.app_context():
         get_db().execute(
@@ -179,14 +184,18 @@ def test_manager_report_uses_requested_columns_and_creation_date_only(client, ap
     page = client.get("/manager?order_no=A001").get_data(as_text=True)
 
     assert "<h2>訂單查詢結果</h2>" in page
-    assert "<th>校機建立日期</th>" in page
-    for heading in ("預計出貨日", "機型", "機台製號", "客戶", "校機人員", "目前狀態", "開始日期", "開始時間", "結束日期", "結束時間", "實際工時", "明細"):
-        assert f"<th>{heading}</th>" in page
+    expected_headers = [
+        "訂單號碼", "校機建立日期", "預計出貨日", "機型", "機台製號", "客戶",
+        "校機狀態", "校機人員", "開始日期", "結束日期", "總時間", "實際工時",
+        "包裝進度", "操作",
+    ]
+    table = page.split('<table class="report-detail-table manager-report-table">', 1)[1].split("</table>", 1)[0]
+    positions = [table.index(f"<th>{heading}</th>") for heading in expected_headers]
+    assert positions == sorted(positions)
+    for heading in ("包裝人員", "包裝開始", "包裝完成", "開始時間", "結束時間", "總經過", "缺料時間", "人工暫停時間"):
+        assert f"<th>{heading}</th>" not in table
     assert "<td>2026-10-28</td>" in page
     assert "2026-10-28 00:00:00" not in page
-    assert "<th>總經過</th>" not in page
-    assert "<th>缺料時間</th>" not in page
-    assert "<th>人工暫停時間</th>" not in page
     assert "每頁 25 台" in page
     assert "下載 Excel" in page
     assert 'class="manager-filter-actions"' in page
@@ -237,8 +246,8 @@ def test_manager_report_sorts_rows_and_marks_open_due_dates(client, app):
 
     due_date_page = client.get("/manager?model_name=閱讀器排序測試&sort_by=expected_ship_date_asc").get_data(as_text=True)
     assert due_date_page.index("Y-COMPLETED") < due_date_page.index("A-OVERDUE") < due_date_page.index("B-DUE-TODAY") < due_date_page.index("Z-FUTURE")
-    overdue_start = due_date_page.index("<td>A-OVERDUE</td>")
-    completed_start = due_date_page.index("<td>Y-COMPLETED</td>")
+    overdue_start = due_date_page.index("A-OVERDUE")
+    completed_start = due_date_page.index("Y-COMPLETED")
     assert 'class="manager-row-overdue"' in due_date_page[overdue_start - 80:overdue_start]
     assert "已逾期" in due_date_page[overdue_start:overdue_start + 500]
     assert 'class="manager-row-due-today"' in due_date_page
@@ -271,8 +280,8 @@ def test_manager_export_reuses_the_full_main_system_excel(client, app):
     assert [cell.value for cell in summary[6]] == ["四軸小計", None, 2, None]
     sheet = workbook["訂單明細"]
     assert [cell.value for cell in sheet[1]] == [
-        "訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態",
-        "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "人工暫停時間", "實際校機工時", "重新檢驗原因",
+        "訂單號碼", "機型", "軸別", "機台製號", "客戶", "校機建立時間", "預計出貨日期", "校機狀態", "校機人員", "開始日期", "開始時間", "結束日期", "結束時間",
+        "缺料時間", "人工暫停時間", "實際校機時間", "重檢原因", None, "包裝進度", "包裝人員", "包裝開始日期", "包裝開始時間", "包裝結束日期", "包裝結束時間",
     ]
     assert [sheet.cell(row=index, column=1).value for index in range(2, 4)] == ["A002", "A001"]
     assert sheet.max_row == 3
@@ -360,6 +369,9 @@ def test_report_detail_opens_order_actions_and_cancel_is_available(client, app):
     assert "列印 Code" in edit
     assert "取消訂單" in edit
     assert "刪除訂單" in edit
+    assert "開始日期時間：" in edit
+    assert "結束日期時間：" in edit
+    assert ">查看明細</a>" in page
 
     response = client.post(f"/orders/{order_a}/cancel", data={"next": f"/orders/{order_a}/edit"})
     assert response.status_code == 302
@@ -393,8 +405,12 @@ def test_axis_type_is_saved_and_reported(client, app):
     with app.app_context():
         update_model(four_axis, "MHR-255")
         assert get_order(get_db().execute("SELECT id FROM inspection_order WHERE order_no='AXIS-4'").fetchone()["id"])["axis_type_snapshot"] == "5"
-    dashboard = client.get("/").get_data(as_text=True)
+    dashboard = client.get("/inspection").get_data(as_text=True)
     assert "四軸" in dashboard and "五軸" in dashboard
+    assert "管理設定" in dashboard
+    assert "機型管理" in dashboard
+    assert "人員設定" in dashboard
+    assert 'class="home-status order-status-panel"' in dashboard
 
 
 def test_model_code_is_generated_and_not_shown_in_model_page(client, app):
@@ -449,7 +465,7 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
     assert "固定暫停條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V701.11.03</div>' in client.get("/").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V701.11.03</div>' in client.get("/inspection").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):
@@ -668,6 +684,25 @@ def test_existing_inspection_database_adds_material_pause_table_without_losing_o
         assert db.execute("SELECT 1 FROM inspection_schema_migrations WHERE version=3").fetchone() is not None
 
 
+def test_existing_inspection_database_adds_packing_columns_before_packing_index(app):
+    setup_data(app)
+    database = app.config["DATABASE"]
+    backup_directory = app.config["BACKUP_DIRECTORY"]
+    with app.app_context():
+        db = get_db()
+        db.execute("DROP INDEX idx_inspection_order_packing_status")
+        db.execute("ALTER TABLE inspection_order DROP COLUMN packing_status")
+        db.execute("DELETE FROM inspection_schema_migrations WHERE version=5")
+        db.commit()
+
+    from app import create_app
+    upgraded = create_app({"TESTING": True, "DATABASE": database, "BACKUP_DIRECTORY": backup_directory, "SECRET_KEY": "upgrade-test"})
+    with upgraded.app_context():
+        db = get_db()
+        assert "packing_status" in {row["name"] for row in db.execute("PRAGMA table_info(inspection_order)")}
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_inspection_order_packing_status'").fetchone() is not None
+
+
 def test_inactive_worker_is_rejected(app, client):
     _, worker_a, _, order_a, _ = setup_data(app)
     with app.app_context():
@@ -726,7 +761,7 @@ def test_same_machine_history_report_and_excel(client, app, tmp_path):
         from openpyxl import load_workbook
         workbook = load_workbook(output, read_only=True)
         detail = workbook["訂單明細"]
-        assert [cell.value for cell in detail[1]] == ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "預計出貨日", "校機人員", "建立時間", "狀態", "開始日期", "開始時間", "結束日期", "結束時間", "總經過時間", "缺料時間", "人工暫停時間", "實際校機工時", "重新檢驗原因"]
+        assert [cell.value for cell in detail[1]] == ["訂單號碼", "機型", "軸別", "機台製號", "客戶", "校機建立時間", "預計出貨日期", "校機狀態", "校機人員", "開始日期", "開始時間", "結束日期", "結束時間", "缺料時間", "人工暫停時間", "實際校機時間", "重檢原因", None, "包裝進度", "包裝人員", "包裝開始日期", "包裝開始時間", "包裝結束日期", "包裝結束時間"]
         assert "員工編號" not in [cell.value for cell in detail[1]]
         exported_rows = {values[0]: values for values in detail.iter_rows(min_row=2, values_only=True)}
         assert exported_rows["A001"][9:13] == ("2026-10-28", "09:02:03", "2026-10-28", "12:05:06")

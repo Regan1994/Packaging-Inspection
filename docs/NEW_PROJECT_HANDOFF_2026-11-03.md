@@ -122,28 +122,21 @@ packing_worker     新增包裝人員
 
 ## 6. 包裝資料方向
 
-包裝資料不可塞進 `inspection_order` 的校機欄位。
-
-建議新增：
+包裝資料已改為直接整合在 `inspection_order`，不建立 `packing_record`。
 
 ```text
-packing_record
-- id
-- inspection_order_id       # 指向既有校機訂單；應唯一
+inspection_order
+- packing_status                    # pending / started / completed
 - packing_worker_id
-- worker_no_snapshot
-- worker_name_snapshot
-- status                    # pending / started / completed
-- started_at
-- finished_at
-- created_at
-- updated_at
-
-packing_scan_event
-packing_audit_log
+- packing_worker_no_snapshot
+- packing_worker_name_snapshot
+- packing_started_at
+- packing_finished_at
 ```
 
-畫面將狀態轉成：
+包裝人員仍獨立保存在 `packing_worker`。掃描紀錄沿用 `inspection_scan_event`，以 `process_stage='packing'` 區分；狀態異動記錄在既有 `inspection_audit_log`。
+
+畫面將 `packing_status` 轉成：
 
 ```text
 pending   → 未開始
@@ -151,7 +144,7 @@ started   → 包裝中
 completed → 包裝完成
 ```
 
-`packing_record.inspection_order_id` 必須具唯一限制，並以資料庫交易／條件更新保護 START、FINISH 的重複掃描與多人同時操作。
+包裝 START、FINISH 以 `inspection_order.packing_status` 的條件更新保護，避免重複掃描與多人同時操作。
 
 ## 7. 校機管理畫面預期變更
 

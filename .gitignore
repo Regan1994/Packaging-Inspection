@@ -5,6 +5,8 @@ __pycache__/
 .pytest-tmp/
 .pytest-tmp-*/
 instance/
+instance-local-test/
+instance-old-db-test/
 build/
 dist/
 *.spec

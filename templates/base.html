@@ -3,16 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TJR校機報工系統</title>
+  <title>TJR 生產系統</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   {% block head %}{% endblock %}
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <header class="topbar">
-    <a class="brand" href="{{ url_for('main.index') }}">TJR校機報工系統</a>
+    <a class="brand" href="{% if request.path.startswith('/packing') %}{{ url_for('main.packing_scan_page') }}{% elif request.endpoint == 'main.index' %}{{ url_for('main.index') }}{% else %}{{ url_for('main.inspection_home') }}{% endif %}">TJR 生產系統</a>
     <nav class="admin-nav">
-      <a href="{{ url_for('main.settings') }}">設定</a>
-      <a href="{{ url_for('main.debug_clear') }}">清除資料</a>
+      {% block header_nav %}<a href="{{ url_for('main.index') }}">系統首頁</a><a href="{{ url_for('main.settings') }}">設定</a><a href="{{ url_for('main.debug_clear') }}">清除資料</a>{% endblock %}
     </nav>
   </header>
   <main class="container {% block container_class %}{% endblock %}">

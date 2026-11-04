@@ -10,6 +10,7 @@ from flask import Blueprint, current_app, flash, jsonify, redirect, render_templ
 from .barcode import code128_svg
 from .db import get_db
 from .services import ASSEMBLY_STAGES, DEBUG_CLEAR_CHOICES, access_password_enabled, backup_database, change_access_password, clear_debug_data, correct_actual_qty, create_assembly_worker, create_batch, create_model, debug_clear_counts, delete_batch, delete_model, ensure_barcodes, export_xlsx, get_assembly_worker, get_batch, get_job, is_five_axis_model, list_assembly_workers, list_models, list_recent_batches, list_report_operators, parse_payload, query_report, restore_database, scan, set_access_password_enabled, set_assembly_worker_active, summarize_report_by_operator, update_model, verify_access_password
+from .services import create_packing_worker, delete_packing_worker, get_packing_worker, list_packing_workers, packing_scan, set_packing_worker_active, update_packing_worker
 
 bp = Blueprint("main", __name__)
 
@@ -394,6 +395,7 @@ PROTECTED_ENDPOINTS = {
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
     "main.pause_barcodes_print",
+    "main.packing_workers", "main.packing_worker_status", "main.packing_worker_update", "main.packing_worker_delete", "main.packing_worker_print",
 }
 
 
@@ -446,6 +448,11 @@ def _home_axis_stats():
 
 @bp.route("/", methods=["GET"])
 def index():
+    return render_template("portal.html")
+
+
+@bp.route("/inspection", methods=["GET"])
+def inspection_home():
     current_worker = get_inspection_worker(session["scan_worker_id"]) if session.get("scan_worker_id") else None
     return render_template("dashboard.html", stats=_home_stats(), axis_stats=_home_axis_stats(), current_worker=current_worker)
 
@@ -544,6 +551,59 @@ def worker_print():
     ids = {int(value) for value in raw_ids if value.isdigit()}
     workers = [ensure_worker_barcode(worker["id"]) for worker in list_inspection_workers() if worker["id"] in ids]
     return render_template("print_workers.html", workers=workers, code128_svg=code128_svg)
+
+
+@bp.route("/packing-workers", methods=["GET", "POST"])
+def packing_workers():
+    if request.method == "POST":
+        try:
+            create_packing_worker(request.form.get("employee_no"), request.form.get("name"))
+            flash("包裝人員已新增", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+    return render_template("packing_workers.html", workers=list_packing_workers())
+
+
+@bp.post("/packing-workers/<int:worker_id>/status")
+def packing_worker_status(worker_id):
+    try:
+        set_packing_worker_active(worker_id, request.form.get("is_active") == "1")
+        flash("包裝人員狀態已更新", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.packing_workers"))
+
+
+@bp.post("/packing-workers/<int:worker_id>/update")
+def packing_worker_update(worker_id):
+    try:
+        update_packing_worker(worker_id, request.form.get("employee_no"), request.form.get("name"))
+        flash("包裝人員已更新", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.packing_workers"))
+
+
+@bp.post("/packing-workers/<int:worker_id>/delete")
+def packing_worker_delete(worker_id):
+    try:
+        backup = delete_packing_worker(
+            worker_id,
+            request.form.get("expected_employee_no", ""),
+            request.form.get("confirmation", ""),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"包裝人員已刪除；已先備份至 {backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有刪除包裝人員：{exc}", "error")
+    return redirect(url_for("main.packing_workers"))
+
+
+@bp.get("/packing-workers/print")
+def packing_worker_print():
+    ids = {int(value) for value in request.args.getlist("ids") if value.isdigit()}
+    workers = [worker for worker in list_packing_workers() if worker["id"] in ids]
+    return render_template("packing_print_workers.html", workers=workers, code128_svg=code128_svg)
 
 
 @bp.route("/orders/new", methods=["GET", "POST"])
@@ -730,6 +790,41 @@ def scan_reset():
     session.pop("scan_pause_action", None)
     flash("已清除目前員工與待處理的缺料／補料／暫停操作", "success")
     return redirect(url_for("main.scan_page"))
+
+
+@bp.post("/packing/scan/reset")
+def packing_scan_reset():
+    session.pop("packing_scan_worker_id", None)
+    flash("已清除目前包裝人員", "success")
+    return redirect(url_for("main.packing_scan_page"))
+
+
+@bp.route("/packing", methods=["GET", "POST"])
+def packing_scan_page():
+    result = None
+    if request.method == "POST":
+        payload = request.form.get("payload", "")
+        result = packing_scan(payload, session.get("packing_scan_worker_id"))
+        result["payload"] = payload
+        if result.get("scan_kind") == "employee" and result.get("worker_id"):
+            session["packing_scan_worker_id"] = result["worker_id"]
+        elif result.get("scan_kind") == "order":
+            session.pop("packing_scan_worker_id", None)
+    current_worker = get_packing_worker(session["packing_scan_worker_id"]) if session.get("packing_scan_worker_id") else None
+    return render_template("packing_scan.html", result=result, current_worker=current_worker)
+
+
+@bp.post("/api/packing/scan")
+def api_packing_scan():
+    result = packing_scan(
+        request.json.get("payload", "") if request.is_json else request.form.get("payload", ""),
+        session.get("packing_scan_worker_id"),
+    )
+    if result.get("scan_kind") == "employee" and result.get("worker_id"):
+        session["packing_scan_worker_id"] = result["worker_id"]
+    elif result.get("scan_kind") == "order":
+        session.pop("packing_scan_worker_id", None)
+    return jsonify(result), 200 if result["result"] in {"success", "duplicate"} else 400
 
 
 @bp.route("/scan", methods=["GET", "POST"])

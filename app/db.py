@@ -182,6 +182,15 @@ CREATE TABLE IF NOT EXISTS inspection_worker (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS packing_worker (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_no TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    name TEXT NOT NULL,
+    barcode TEXT NOT NULL UNIQUE,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inspection_order (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_no TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -197,6 +206,12 @@ CREATE TABLE IF NOT EXISTS inspection_order (
     worker_id INTEGER REFERENCES inspection_worker(id),
     worker_no_snapshot TEXT,
     worker_name_snapshot TEXT,
+    packing_status TEXT NOT NULL DEFAULT 'pending' CHECK(packing_status IN ('pending','started','completed')),
+    packing_worker_id INTEGER REFERENCES packing_worker(id),
+    packing_worker_no_snapshot TEXT,
+    packing_worker_name_snapshot TEXT,
+    packing_started_at TEXT,
+    packing_finished_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -220,6 +235,7 @@ CREATE TABLE IF NOT EXISTS inspection_scan_event (
     employee_no TEXT,
     result TEXT NOT NULL,
     message TEXT NOT NULL,
+    process_stage TEXT NOT NULL DEFAULT 'inspection' CHECK(process_stage IN ('inspection','packing')),
     scanned_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS inspection_material_pause (
@@ -301,6 +317,23 @@ def migrate_inspection_schema(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_inspection_manual_pause_order ON inspection_manual_pause(order_id, paused_at)")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_inspection_manual_pause_open ON inspection_manual_pause(order_id) WHERE resumed_at IS NULL")
     db.execute("INSERT OR IGNORE INTO inspection_schema_migrations(version, applied_at) VALUES (?, ?)", (4, utc_now()))
+    order_columns = {row["name"] for row in db.execute("PRAGMA table_info(inspection_order)")}
+    packing_columns = {
+        "packing_status": "TEXT NOT NULL DEFAULT 'pending' CHECK(packing_status IN ('pending','started','completed'))",
+        "packing_worker_id": "INTEGER REFERENCES packing_worker(id)",
+        "packing_worker_no_snapshot": "TEXT",
+        "packing_worker_name_snapshot": "TEXT",
+        "packing_started_at": "TEXT",
+        "packing_finished_at": "TEXT",
+    }
+    for column, definition in packing_columns.items():
+        if column not in order_columns:
+            db.execute(f"ALTER TABLE inspection_order ADD COLUMN {column} {definition}")
+    scan_columns = {row["name"] for row in db.execute("PRAGMA table_info(inspection_scan_event)")}
+    if "process_stage" not in scan_columns:
+        db.execute("ALTER TABLE inspection_scan_event ADD COLUMN process_stage TEXT NOT NULL DEFAULT 'inspection' CHECK(process_stage IN ('inspection','packing'))")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_inspection_order_packing_status ON inspection_order(packing_status)")
+    db.execute("INSERT OR IGNORE INTO inspection_schema_migrations(version, applied_at) VALUES (?, ?)", (5, utc_now()))
 
     db.executescript(SCHEMA)
     needs_batch_mode_migration = db.execute("SELECT 1 FROM schema_migrations WHERE version=2").fetchone() is None
