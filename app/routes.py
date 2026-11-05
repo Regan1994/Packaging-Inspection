@@ -1065,7 +1065,7 @@ def debug_clear():
     return render_template("inspection_debug_clear.html", counts=debug_clear_counts(), choices=DEBUG_CLEAR_CHOICES)
 
 
-@bp.post("/backup")
+@bp.route("/backup", methods=["GET", "POST"])
 def backup():
     try:
         target = backup_database(current_app.config["BACKUP_DIRECTORY"])
