@@ -1,5 +1,8 @@
+from datetime import datetime
+from pathlib import Path
+
 from app.db import get_db
-from app.services import create_inspection_worker, create_model, create_order, create_packing_worker, packing_scan, scan
+from app.services import TAIPEI_TZ, create_inspection_worker, create_model, create_order, create_packing_worker, format_datetime, get_order, packing_scan, scan
 
 
 def _barcode(table, worker_id):
@@ -75,6 +78,32 @@ def test_packing_routes_keep_the_packing_worker_session(client, app):
     assert started.status_code == 200
     with app.app_context():
         assert get_db().execute("SELECT packing_status FROM inspection_order WHERE id=?", (order_id,)).fetchone()["packing_status"] == "started"
+
+
+def test_completed_order_can_be_manually_marked_packed(client, app):
+    inspection_worker_id, _, _, order_id = _setup(app)
+    with app.app_context():
+        _complete_inspection(inspection_worker_id, order_id)
+        assert get_order(order_id)["packing_status"] == "pending"
+
+    page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
+    assert "完成包裝" in page
+    response = client.post(f"/orders/{order_id}/packing-complete", data={"next": f"/orders/{order_id}/edit"})
+    assert response.status_code == 302
+    assert response.location.endswith(f"/orders/{order_id}/edit")
+
+    expected = datetime.now(TAIPEI_TZ).date().isoformat() + " 00:00:00"
+    with app.app_context():
+        order = get_order(order_id)
+        assert order["packing_status"] == "completed"
+        assert format_datetime(order["packing_started_at"]) == expected
+        assert format_datetime(order["packing_finished_at"]) == expected
+        audit = get_db().execute(
+            "SELECT action FROM inspection_audit_log WHERE action='manual_packing_complete' AND entity_id=?",
+            (str(order_id),),
+        ).fetchone()
+        assert audit["action"] == "manual_packing_complete"
+        assert list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
 
 
 def test_system_portal_separates_inspection_and_packing(client):

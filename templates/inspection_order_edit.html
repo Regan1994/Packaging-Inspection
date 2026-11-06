@@ -4,13 +4,33 @@
 {% include "_order_detail_view.html" %}
 <section class="panel">
   <h2>訂單操作</h2>
-  <div class="row">
+  <div class="order-actions">
     <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>
     {% if order.status == 'pending' %}
-    <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" class="inline" onsubmit="return confirm('確定取消這筆訂單？取消後會保留歷史紀錄。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">取消訂單</button></form>
-    <form method="post" action="{{ url_for('main.order_delete', order_id=order.id) }}" class="inline" onsubmit="return confirm('確定刪除這筆尚未開始的訂單？刪除前會先備份，刪除後無法復原。');"><input type="hidden" name="csrf_token" value="{{ delete_token }}"><input type="hidden" name="expected_order_no" value="{{ order.order_no }}"><input type="hidden" name="confirmation" value="刪除"><input type="hidden" name="next" value="{{ delete_next }}"><button class="button danger">刪除訂單</button></form>
+    <div class="order-action order-action-cancel">
+      <div><strong>訂單取消</strong><small>保留訂單紀錄與單號，之後不能用同單號建立新訂單。</small></div>
+      <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="return confirm('確定取消這筆訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
+    </div>
+    <div class="order-action order-action-delete">
+      <div><strong>訂單刪除</strong><small>刪除訂單資料與單號；刪除前會先備份，之後可用相同單號重新建立。</small></div>
+      <form method="post" action="{{ url_for('main.order_delete', order_id=order.id) }}" onsubmit="return confirm('確定刪除這筆訂單？刪除後會移除訂單、條碼與紀錄，且釋放訂單號碼；刪除前會先備份。');"><input type="hidden" name="csrf_token" value="{{ delete_token }}"><input type="hidden" name="expected_order_no" value="{{ order.order_no }}"><input type="hidden" name="confirmation" value="刪除"><input type="hidden" name="next" value="{{ delete_next }}"><button class="button danger">訂單刪除</button></form>
+    </div>
     {% elif order.status == 'started' %}
-    <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" class="inline" onsubmit="return confirm('確定取消這筆校機中的訂單？取消後會保留歷史紀錄。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">取消訂單</button></form>
+    <div class="order-action order-action-cancel">
+      <div><strong>訂單取消</strong><small>保留訂單紀錄與單號；取消後仍可再選擇刪除以釋放單號。</small></div>
+      <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="return confirm('確定取消這筆校機中的訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
+    </div>
+    {% elif order.status == 'cancelled' %}
+    <div class="order-action order-action-delete">
+      <div><strong>訂單刪除</strong><small>此訂單已取消；刪除後會移除訂單資料與單號，之後可用相同單號重新建立。</small></div>
+      <form method="post" action="{{ url_for('main.order_delete', order_id=order.id) }}" onsubmit="return confirm('確定刪除這筆已取消訂單？刪除後會移除訂單、條碼與紀錄，且釋放訂單號碼；刪除前會先備份。');"><input type="hidden" name="csrf_token" value="{{ delete_token }}"><input type="hidden" name="expected_order_no" value="{{ order.order_no }}"><input type="hidden" name="confirmation" value="刪除"><input type="hidden" name="next" value="{{ delete_next }}"><button class="button danger">訂單刪除</button></form>
+    </div>
+    {% endif %}
+    {% if order.status == 'completed' and order.packing_status == 'pending' %}
+    <div class="order-action order-action-packing">
+      <div><strong>完成包裝補登</strong><small>包裝系統尚未建立紀錄；按下後會將包裝開始與結束日期補登為今天，時間皆為 00:00:00。</small></div>
+      <form method="post" action="{{ url_for('main.order_packing_complete', order_id=order.id) }}" onsubmit="return confirm('確定手動完成這筆包裝？包裝開始與結束時間會記錄為今天 00:00:00。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button primary">完成包裝</button></form>
+    </div>
     {% endif %}
     <a class="button" href="{{ url_for('main.reports') }}">返回訂單明細</a>
   </div>

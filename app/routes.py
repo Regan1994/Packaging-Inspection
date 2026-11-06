@@ -370,6 +370,7 @@ from .services import (
     list_inspection_workers,
     list_models,
     list_report_workers,
+    manually_complete_packing,
     material_action_barcodes,
     pause_action_barcodes,
     query_report,
@@ -392,7 +393,7 @@ bp = Blueprint("main", __name__)
 PROTECTED_ENDPOINTS = {
     "main.models", "main.model_update", "main.model_delete", "main.inspection_workers",
     "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
-    "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_admin_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.reports", "main.reports_export",
+    "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_admin_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.order_packing_complete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
     "main.pause_barcodes_print",
@@ -788,6 +789,17 @@ def order_cancel(order_id):
     except ValueError as exc:
         flash(str(exc), "error")
     return redirect(safe_next_path(request.form.get("next")))
+
+
+@bp.post("/orders/<int:order_id>/packing-complete")
+def order_packing_complete(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = manually_complete_packing(order_id, current_app.config["BACKUP_DIRECTORY"])
+        flash(f"已手動完成包裝；開始與結束時間已補登為今日 00:00:00；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有完成包裝：{exc}", "error")
+    return redirect(next_path)
 
 
 @bp.post("/orders/<int:order_id>/delete")

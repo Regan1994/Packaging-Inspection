@@ -371,8 +371,8 @@ def test_report_detail_opens_order_actions_and_cancel_is_available(client, app):
     assert "時間與工時" in edit
     assert "缺料／人工暫停紀錄" in edit
     assert "列印 Code" in edit
-    assert "取消訂單" in edit
-    assert "刪除訂單" in edit
+    assert "訂單取消" in edit
+    assert "訂單刪除" in edit
     assert "開始日期時間：" in edit
     assert "結束日期時間：" in edit
     assert ">查看明細</a>" in page
@@ -382,6 +382,23 @@ def test_report_detail_opens_order_actions_and_cancel_is_available(client, app):
     assert response.location.endswith(f"/orders/{order_a}/edit")
     with app.app_context():
         assert get_order(order_a)["status"] == "cancelled"
+
+    cancelled_edit = client.get(f"/orders/{order_a}/edit").get_data(as_text=True)
+    assert "此訂單已取消" in cancelled_edit
+    assert "之後可用相同單號重新建立" in cancelled_edit
+    with client.session_transaction() as session:
+        token = session["order_delete_token"]
+    response = client.post(f"/orders/{order_a}/delete", data={
+        "csrf_token": token,
+        "expected_order_no": "A001",
+        "confirmation": "刪除",
+        "next": "/reports",
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        assert get_order(order_a) is None
+        recreated = create_order("A001", 1, "E27-99")
+        assert get_order(recreated)["machine_serial"] == "E27-99"
 
     recent = client.get("/orders/recent")
     assert recent.status_code == 302

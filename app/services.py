@@ -2078,6 +2078,60 @@ def packing_scan(payload, worker_id=None):
     return {"event_id": event_id, "result": result, "message": message, "scanned_at": scanned_at, "scan_kind": "order", "clear_worker": True, "order_no": order["order_no"] if order else parsed.get("order_no", ""), "barcode_type": parsed.get("type")}
 
 
+def manually_complete_packing(order_id, backup_dir, operator_name="admin"):
+    """Backfill a completed packing record for an already completed inspection order."""
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    if order["status"] != "completed":
+        raise ValueError("校機尚未完成，不能手動完成包裝")
+    if order["packing_status"] == "completed":
+        raise ValueError("此訂單已完成包裝")
+    if order["packing_status"] != "pending":
+        raise ValueError("包裝已開始，請使用包裝掃描完成")
+
+    local_midnight = datetime.combine(datetime.now(TAIPEI_TZ).date(), time.min, tzinfo=TAIPEI_TZ)
+    midnight_utc = local_midnight.astimezone(timezone.utc).isoformat(timespec="seconds")
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute("SELECT order_no,status,packing_status FROM inspection_order WHERE id=?", (order_id,)).fetchone()
+        if not current:
+            raise ValueError("找不到訂單")
+        if current["status"] != "completed":
+            raise ValueError("校機尚未完成，不能手動完成包裝")
+        if current["packing_status"] != "pending":
+            raise ValueError("包裝狀態已變更，請重新開啟訂單")
+        updated = db.execute(
+            """
+            UPDATE inspection_order
+            SET packing_status='completed',packing_started_at=?,packing_finished_at=?,updated_at=?
+            WHERE id=? AND status='completed' AND packing_status='pending'
+            """,
+            (midnight_utc, midnight_utc, utc_now(), order_id),
+        ).rowcount
+        if not updated:
+            raise ValueError("包裝狀態已變更，請重新開啟訂單")
+        _inspection_audit(
+            "manual_packing_complete",
+            "inspection_order",
+            order_id,
+            {
+                "order_no": current["order_no"],
+                "packing_started_at": midnight_utc,
+                "packing_finished_at": midnight_utc,
+                "backup": str(backup),
+            },
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
 def cancel_order(order_id, cancelled_by="admin"):
     db = get_db()
     order = get_order(order_id)
@@ -2484,8 +2538,8 @@ def delete_order(order_id, expected_order_no, confirmation, backup_dir, operator
     order = get_order(order_id)
     if not order or order["order_no"] != (expected_order_no or "").strip():
         raise ValueError("訂單不存在或訂單號碼已變更")
-    if order["status"] != "pending":
-        raise ValueError("已開始或已完成的訂單不能刪除；請保留歷史紀錄")
+    if order["status"] not in {"pending", "cancelled"}:
+        raise ValueError("已開始或已完成的訂單不能刪除；請先取消後再刪除，或保留歷史紀錄")
 
     backup = backup_database(backup_dir)
     removed = {"scan_events": 0, "barcodes": 0, "order": 0}
@@ -2494,8 +2548,8 @@ def delete_order(order_id, expected_order_no, confirmation, backup_dir, operator
         current = db.execute("SELECT order_no,status FROM inspection_order WHERE id=?", (order_id,)).fetchone()
         if not current or current["order_no"] != order["order_no"]:
             raise ValueError("訂單不存在或訂單號碼已變更")
-        if current["status"] != "pending":
-            raise ValueError("已開始或已完成的訂單不能刪除；請保留歷史紀錄")
+        if current["status"] not in {"pending", "cancelled"}:
+            raise ValueError("已開始或已完成的訂單不能刪除；請先取消後再刪除，或保留歷史紀錄")
         removed["scan_events"] = db.execute("SELECT COUNT(*) FROM inspection_scan_event WHERE order_id=?", (order_id,)).fetchone()[0]
         removed["barcodes"] = db.execute("SELECT COUNT(*) FROM inspection_barcode_record WHERE order_id=?", (order_id,)).fetchone()[0]
         db.execute("DELETE FROM inspection_scan_event WHERE order_id=?", (order_id,))
