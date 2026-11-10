@@ -90,17 +90,18 @@ def test_order_form_can_reuse_existing_model(client, app):
         assert order["model_id"] == get_db().execute("SELECT id FROM inspection_model_master WHERE model_name=?", ("HR-255",)).fetchone()["id"]
 
 
-def test_manual_start_backdates_order_and_allows_finish(client, app):
+def test_operation_correction_backdates_order_and_allows_finish(client, app):
     _, worker_a, _, order_a, _ = setup_data(app)
 
     page = client.get(f"/orders/{order_a}/edit").get_data(as_text=True)
-    assert "補登開始時間" in page
+    assert "作業紀錄修正" in page
 
     response = client.post(
-        f"/orders/{order_a}/manual-start",
+        f"/orders/{order_a}/admin-correct",
         data={
             "worker_id": str(worker_a),
             "started_at": "2026-10-29T08:00",
+            "finished_at": "",
             "reason": "機台先到現場",
             "operator_name": "admin",
             "password": "TJR",
@@ -114,8 +115,8 @@ def test_manual_start_backdates_order_and_allows_finish(client, app):
         assert order["status"] == "started"
         assert order["worker_id"] == worker_a
         assert order["started_at"] == "2026-10-29T00:00:00+00:00"
-        audit = get_db().execute("SELECT action,details FROM inspection_audit_log WHERE entity_id=? AND action='manual_start' LIMIT 1", (str(order_a),)).fetchone()
-        assert audit["action"] == "manual_start"
+        audit = get_db().execute("SELECT action,details FROM inspection_audit_log WHERE entity_id=? AND action='admin_correct_order' LIMIT 1", (str(order_a),)).fetchone()
+        assert audit["action"] == "admin_correct_order"
         assert "機台先到現場" in audit["details"]
         assert list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
 
@@ -486,7 +487,7 @@ def test_scanned_worker_can_be_replaced_or_cleared(client, app):
     assert "固定缺料條碼 → 該訂單 START" in page
     assert "固定補料條碼 → 該訂單 START" in page
     assert "固定暫停條碼 → 該訂單 START" in page
-    assert '<div class="home-version" aria-label="系統版本">V701.11.03</div>' in client.get("/inspection").get_data(as_text=True)
+    assert '<div class="home-version" aria-label="系統版本">V801.11.10</div>' in client.get("/inspection").get_data(as_text=True)
 
 
 def test_scan_accepts_scanner_prefix_and_existing_legacy_barcodes(client, app):

@@ -9,7 +9,7 @@ from flask import Blueprint, current_app, flash, jsonify, redirect, render_templ
 
 from .barcode import code128_svg
 from .db import get_db
-from .services import ASSEMBLY_STAGES, DEBUG_CLEAR_CHOICES, access_password_enabled, backup_database, change_access_password, clear_debug_data, correct_actual_qty, create_assembly_worker, create_batch, create_model, debug_clear_counts, delete_batch, delete_model, ensure_barcodes, export_xlsx, get_assembly_worker, get_batch, get_job, is_five_axis_model, list_assembly_workers, list_models, list_recent_batches, list_report_operators, parse_payload, query_report, restore_database, scan, set_access_password_enabled, set_assembly_worker_active, summarize_report_by_operator, update_expected_ship_date, update_model, verify_access_password
+from .services import ASSEMBLY_STAGES, DEBUG_CLEAR_CHOICES, access_password_enabled, backup_database, change_access_password, clear_debug_data, correct_actual_qty, create_assembly_worker, create_batch, create_model, debug_clear_counts, delete_batch, delete_model, ensure_barcodes, export_xlsx, get_assembly_worker, get_batch, get_job, is_five_axis_model, list_assembly_workers, list_models, list_recent_batches, list_report_operators, parse_payload, query_report, restore_database, scan, set_access_password_enabled, set_assembly_worker_active, summarize_report_by_operator, update_model, verify_access_password
 from .services import create_packing_worker, delete_packing_worker, get_packing_worker, list_packing_workers, packing_scan, set_packing_worker_active, update_packing_worker
 
 bp = Blueprint("main", __name__)
@@ -26,7 +26,6 @@ PROTECTED_ENDPOINTS = {
     "main.batch_delete",
     "main.reports",
     "main.reports_export",
-    "main.order_expected_ship_date_update",
     "main.quantity_update",
     "main.settings",
     "main.change_password",
@@ -352,6 +351,8 @@ from .services import (
     change_access_password,
     clear_debug_data,
     correct_order_timeline,
+    correct_operation_timeline,
+    correct_packing_timeline,
     correct_pause_record,
     create_inspection_worker,
     create_model,
@@ -376,7 +377,6 @@ from .services import (
     query_report,
     restore_database,
     scan,
-    start_order_manually,
     set_access_password_enabled,
     set_inspection_worker_active,
     status_label,
@@ -393,7 +393,7 @@ bp = Blueprint("main", __name__)
 PROTECTED_ENDPOINTS = {
     "main.models", "main.model_update", "main.model_delete", "main.inspection_workers",
     "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
-    "main.order_edit", "main.order_print", "main.order_manual_start", "main.order_admin_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.order_packing_complete", "main.reports", "main.reports_export",
+    "main.order_edit", "main.order_print", "main.order_admin_correct", "main.order_operation_timeline_correct", "main.order_packing_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.order_packing_complete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
     "main.pause_barcodes_print",
@@ -645,51 +645,14 @@ def order_edit(order_id):
         material_pauses=material_pauses,
         manual_pauses=manual_pauses,
         pause_intervals=material_pauses + manual_pauses,
-        workers=list_inspection_workers(active_only=True),
         correction_workers=list_inspection_workers(),
+        packing_correction_workers=list_packing_workers(),
         corrections=list_order_corrections(order_id),
         datetime_local_value=datetime_local_value,
-        manual_start_default=datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M"),
         delete_token=token,
         delete_next=url_for("main.reports"),
         edit_next=url_for("main.order_edit", order_id=order_id),
     )
-
-
-@bp.post("/orders/<int:order_id>/expected-ship-date")
-def order_expected_ship_date_update(order_id):
-    next_path = safe_next_path(request.form.get("next"))
-    try:
-        backup = update_expected_ship_date(
-            order_id,
-            request.form.get("expected_ship_date"),
-            request.form.get("reason"),
-            request.form.get("operator_name"),
-            request.form.get("password"),
-            current_app.config["BACKUP_DIRECTORY"],
-        )
-        flash(f"需求日期已修改；修改前備份：{backup.name}", "success")
-    except (ValueError, OSError, sqlite3.Error) as exc:
-        flash(f"沒有修改需求日期：{exc}", "error")
-    return redirect(next_path)
-
-
-@bp.post("/orders/<int:order_id>/manual-start")
-def order_manual_start(order_id):
-    try:
-        start_order_manually(
-            order_id,
-            request.form.get("worker_id"),
-            request.form.get("started_at"),
-            request.form.get("reason"),
-            request.form.get("operator_name"),
-            request.form.get("password"),
-            current_app.config["BACKUP_DIRECTORY"],
-        )
-        flash("已補登訂單實際開始時間", "success")
-    except (ValueError, OSError, sqlite3.Error) as exc:
-        flash(str(exc), "error")
-    return redirect(safe_next_path(request.form.get("next")))
 
 
 @bp.post("/orders/<int:order_id>/admin-correct")
@@ -709,6 +672,55 @@ def order_admin_correct(order_id):
         flash(f"訂單報工資料已修正；修改前備份：{backup.name}", "success")
     except (ValueError, OSError, sqlite3.Error) as exc:
         flash(f"沒有修正訂單：{exc}", "error")
+    return redirect(next_path)
+
+
+@bp.post("/orders/<int:order_id>/operation-timeline-correct")
+def order_operation_timeline_correct(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    field_names = ("pause_type", "pause_id", "paused_at", "resumed_at", "original_paused_at", "original_resumed_at")
+    fields = {name: request.form.getlist(name) for name in field_names}
+    row_count = max((len(values) for values in fields.values()), default=0)
+    pause_rows = [
+        {name: fields[name][index] if index < len(fields[name]) else "" for name in field_names}
+        for index in range(row_count)
+    ]
+    try:
+        backup = correct_operation_timeline(
+            order_id,
+            request.form.get("worker_id"),
+            request.form.get("started_at"),
+            request.form.get("finished_at"),
+            pause_rows,
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"校機作業時間軸已修正；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有修正校機作業時間軸：{exc}", "error")
+    return redirect(next_path)
+
+
+@bp.post("/orders/<int:order_id>/packing-correct")
+def order_packing_correct(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = correct_packing_timeline(
+            order_id,
+            request.form.get("packing_status"),
+            request.form.get("packing_worker_id"),
+            request.form.get("packing_started_at"),
+            request.form.get("packing_finished_at"),
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"包裝作業資料已修正；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有修正包裝作業：{exc}", "error")
     return redirect(next_path)
 
 

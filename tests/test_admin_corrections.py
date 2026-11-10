@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from app.db import get_db
-from app.services import create_inspection_worker, create_model, create_order, format_work_duration, get_order
+from app.services import create_inspection_worker, create_model, create_order, create_packing_worker, format_work_duration, get_order
 
 
 def setup_order(app):
@@ -46,7 +46,7 @@ def pause_data(**overrides):
 def test_admin_order_correction_requires_password_backs_up_and_audits(client, app):
     _, worker_b, order_id = setup_order(app)
     page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
-    assert "管理員錯誤修正" in page
+    assert "作業紀錄修正" in page
     assert 'name="password"' in page
 
     rejected = client.post(
@@ -89,45 +89,54 @@ def test_admin_order_correction_requires_password_backs_up_and_audits(client, ap
         assert details["backup"].endswith(backups[0].name)
 
 
-def test_business_can_update_expected_ship_date_with_backup_and_audit(client, app):
+def test_order_edit_groups_only_operation_corrections(client, app):
     _, _, order_id = setup_order(app)
-    with app.app_context():
-        get_db().execute("UPDATE inspection_order SET expected_ship_date=? WHERE id=?", ("2026-11-04", order_id))
-        get_db().commit()
+    page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
+    assert "修改需求日期" not in page
+    assert "補登開始時間" not in page
+    assert "作業紀錄修正" in page
+    assert "校機作業" in page
 
-    rejected = client.post(
-        f"/orders/{order_id}/expected-ship-date",
-        data={"expected_ship_date": "2026-11-10", "reason": "調整客戶需求", "operator_name": "業務甲", "password": "wrong", "next": f"/orders/{order_id}/edit"},
-        follow_redirects=True,
+
+def test_admin_can_correct_packing_worker_and_timeline(client, app):
+    worker_a, _, order_id = setup_order(app)
+    client.post(
+        f"/orders/{order_id}/admin-correct",
+        data=correction_data(worker_a, finished_at="2026-10-29T10:00"),
     )
-    assert "管理密碼錯誤" in rejected.get_data(as_text=True)
-    assert not list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
+    with app.app_context():
+        packing_worker = create_packing_worker("P001", "包裝甲")
 
     response = client.post(
-        f"/orders/{order_id}/expected-ship-date",
-        data={"expected_ship_date": "2026-11-10", "reason": "調整客戶需求", "operator_name": "業務甲", "password": "TJR", "next": f"/orders/{order_id}/edit"},
+        f"/orders/{order_id}/packing-correct",
+        data={
+            "packing_status": "completed",
+            "packing_worker_id": str(packing_worker),
+            "packing_started_at": "2026-10-29T10:10",
+            "packing_finished_at": "2026-10-29T10:30",
+            "reason": "補登包裝紀錄",
+            "operator_name": "主管甲",
+            "password": "TJR",
+            "next": f"/orders/{order_id}/edit",
+        },
     )
     assert response.status_code == 302
-    backups = list(Path(app.config["BACKUP_DIRECTORY"]).glob("inspection_backup_*.db"))
-    assert len(backups) == 1
-    with sqlite3.connect(backups[0]) as backup:
-        assert backup.execute("SELECT expected_ship_date FROM inspection_order WHERE id=?", (order_id,)).fetchone()[0] == "2026-11-04"
-
     with app.app_context():
-        assert get_order(order_id)["expected_ship_date"] == "2026-11-10"
+        order = get_order(order_id)
+        assert order["packing_status"] == "completed"
+        assert order["packing_worker_id"] == packing_worker
+        assert order["packing_worker_name_snapshot"] == "包裝甲"
+        assert order["packing_started_at"] == "2026-10-29T02:10:00+00:00"
+        assert order["packing_finished_at"] == "2026-10-29T02:30:00+00:00"
         audit = get_db().execute(
-            "SELECT * FROM inspection_audit_log WHERE action='admin_update_expected_ship_date' AND entity_id=?",
+            "SELECT * FROM inspection_audit_log WHERE action='admin_correct_packing' AND entity_id=?",
             (str(order_id),),
         ).fetchone()
-        details = json.loads(audit["details"])
-        assert audit["operator_name"] == "業務甲"
-        assert details["old"]["expected_ship_date"] == "2026-11-04"
-        assert details["new"]["expected_ship_date"] == "2026-11-10"
-        assert details["reason"] == "調整客戶需求"
+        assert json.loads(audit["details"])["reason"] == "補登包裝紀錄"
 
     page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
-    assert "修改需求日期" in page
-    assert 'value="2026-11-10"' in page
+    assert "包裝作業" in page
+    assert "確認修正包裝資料" in page
 
 
 def test_admin_can_add_and_correct_pause_without_allowing_overlap(client, app):

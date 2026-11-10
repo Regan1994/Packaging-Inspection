@@ -14,6 +14,6 @@
     <article><strong>1. 開始包裝</strong><span>包裝員工條碼 → 既有訂單 START</span></article>
     <article><strong>2. 完成包裝</strong><span>同一位包裝員工條碼 → 同一訂單 FINISH</span></article>
   </div>
-  <ul class="scan-guide-notes"><li>校機尚未完成時，系統會拒絕開始包裝。</li><li>同一筆訂單只會有一個包裝進度：未開始、包裝中、包裝完成。</li><li>完成一筆操作後，系統會清除目前人員；下一筆需重新掃描包裝員工條碼。</li></ul>
+  <ul class="scan-guide-notes"><li>尚未開始校機的訂單，掃描包裝 START 時會自動補登校機完成；校機開始與完成時間皆記錄為當天 00:00:00。</li><li>校機進行中的訂單仍須先完成校機，才能開始包裝。</li><li>同一筆訂單只會有一個包裝進度：未開始、包裝中、包裝完成。</li><li>完成一筆操作後，系統會清除目前人員；下一筆需重新掃描包裝員工條碼。</li></ul>
 </section>
 {% endblock %}

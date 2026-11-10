@@ -8,7 +8,7 @@
     <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>
     {% if order.status == 'pending' %}
     <div class="order-action order-action-cancel">
-      <div><strong>訂單取消</strong><small>保留訂單紀錄與單號，之後不能用同單號建立新訂單。</small></div>
+      <div><strong>業務取消訂單</strong><small>保留訂單紀錄與單號，之後不能用同單號建立新訂單。</small></div>
       <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="return confirm('確定取消這筆訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
     </div>
     <div class="order-action order-action-delete">
@@ -17,7 +17,7 @@
     </div>
     {% elif order.status == 'started' %}
     <div class="order-action order-action-cancel">
-      <div><strong>訂單取消</strong><small>保留訂單紀錄與單號；取消後仍可再選擇刪除以釋放單號。</small></div>
+      <div><strong>業務取消訂單</strong><small>保留訂單紀錄與單號；取消後仍可再選擇刪除以釋放單號。</small></div>
       <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="return confirm('確定取消這筆校機中的訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
     </div>
     {% elif order.status == 'cancelled' %}
@@ -35,93 +35,75 @@
     <a class="button" href="{{ url_for('main.reports') }}">返回訂單明細</a>
   </div>
 </section>
-<section class="panel">
-  <h2>修改需求日期</h2>
-  <p class="muted">業務可在此修改需求日期（預計出貨日）。每次修改都會先備份資料庫，並保留修改前後日期、修改人與原因；日期留白表示清除需求日期。</p>
-  <form method="post" action="{{ url_for('main.order_expected_ship_date_update', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定修改這筆訂單的需求日期？');">
-    <div class="grid two">
-      <label>需求日期（預計出貨日）<input type="date" name="expected_ship_date" value="{{ order.expected_ship_date or '' }}"></label>
-      <label>修改人<input name="operator_name" maxlength="80" required></label>
-    </div>
-    <label>修改原因<input name="reason" maxlength="200" required></label>
-    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
-    <input type="hidden" name="next" value="{{ edit_next }}">
-    <button class="button primary">確認修改需求日期</button>
-  </form>
-</section>
-{% if order.status == 'pending' %}
-<section class="panel">
-  <h2>補登開始時間</h2>
-  <p class="muted">若機台已到現場但未能即時掃描 START，可在此補登實際開始校機時間。正常流程仍建議使用員工條碼與 START 條碼。</p>
-  <form method="post" action="{{ url_for('main.order_manual_start', order_id=order.id) }}" class="form-wide">
-    <div class="grid two">
-      <label>校機人員<select name="worker_id" required><option value="">請選擇</option>{% for worker in workers %}<option value="{{ worker.id }}">{{ worker.name }}（{{ worker.employee_no }}）</option>{% endfor %}</select></label>
-      <label>實際開始時間<input type="datetime-local" name="started_at" value="{{ manual_start_default }}" required></label>
-    </div>
-    <label>補登原因<input name="reason" value="現場補登實際開始時間" maxlength="200"></label>
-    <label>補登人員<input name="operator_name" maxlength="80" required></label>
-    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
-    <input type="hidden" name="next" value="{{ edit_next }}">
-    <button class="button primary">補登開始</button>
-  </form>
-</section>
-{% endif %}
 {% if order.status != 'cancelled' %}
 <section class="panel">
-  <h2>管理員錯誤修正</h2>
-  <p class="muted">僅用於誤掃或漏掃修正。每次修改都會先備份資料庫，並保留修改前後資料、修改人與原因。管理密碼必須在每次送出時重新輸入。</p>
-  <form method="post" action="{{ url_for('main.order_admin_correct', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定修正此訂單的校機人員或 START／FINISH 時間？');">
+  <h2>作業紀錄修正</h2>
+  <p class="muted">僅用於誤掃或漏掃修正。校機、人工暫停、缺料／補料集中在同一個時間軸；欄位會先帶入目前資料，只需修改錯的時間。</p>
+  <form method="post" action="{{ url_for('main.order_operation_timeline_correct', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定儲存這次作業時間軸修正？');">
+    <h3>校機與暫停時間</h3>
     <div class="grid two">
       <label>校機人員<select name="worker_id" required><option value="">請選擇</option>{% for worker in correction_workers %}<option value="{{ worker.id }}" {% if worker.id == order.worker_id %}selected{% endif %}>{{ worker.name }}（{{ worker.employee_no }}）{% if not worker.is_active %}［已停用］{% endif %}</option>{% endfor %}</select></label>
-      <label>START 時間<input type="datetime-local" name="started_at" value="{{ datetime_local_value(order.started_at) }}" required></label>
-      <label>FINISH 時間（未完成可留空）<input type="datetime-local" name="finished_at" value="{{ datetime_local_value(order.finished_at) }}"></label>
+      <label>START 時間（留白表示不修改）<input type="datetime-local" name="started_at" value="{{ datetime_local_value(order.started_at) }}"></label>
+      <label>FINISH 時間（留白表示進行中）<input type="datetime-local" name="finished_at" value="{{ datetime_local_value(order.finished_at) }}"></label>
+    </div>
+    {% for pause_type, pause_label, pauses in [('material', '缺料／補料', material_pauses), ('manual', '人工暫停／恢復', manual_pauses)] %}
+      {% for pause in pauses %}
+      <div class="pause-record-editor">
+        <h4>{{ pause_label }}紀錄 #{{ pause.id }}</h4>
+        <input type="hidden" name="pause_type" value="{{ pause_type }}">
+        <input type="hidden" name="pause_id" value="{{ pause.id }}">
+        <input type="hidden" name="original_paused_at" value="{{ pause.paused_at }}">
+        <input type="hidden" name="original_resumed_at" value="{{ pause.resumed_at or '' }}">
+        <div class="grid two">
+          <label>開始時間（留白表示不修改）<input type="datetime-local" name="paused_at" value="{{ datetime_local_value(pause.paused_at) }}"></label>
+          <label>結束時間（留白表示仍在進行）<input type="datetime-local" name="resumed_at" value="{{ datetime_local_value(pause.resumed_at) }}"></label>
+        </div>
+      </div>
+      {% endfor %}
+    {% endfor %}
+    <div class="pause-record-editor">
+      <h4>新增一段暫停（沒有新增時保持空白）</h4>
+      <input type="hidden" name="pause_id" value="">
+      <input type="hidden" name="original_paused_at" value="">
+      <input type="hidden" name="original_resumed_at" value="">
+      <div class="grid two">
+        <label>類型<select name="pause_type"><option value="manual">人工暫停／恢復</option><option value="material">缺料／補料</option></select></label>
+        <label>開始時間<input type="datetime-local" name="paused_at"></label>
+        <label>結束時間（可留白）<input type="datetime-local" name="resumed_at"></label>
+      </div>
+    </div>
+    <p class="muted">規則：已有紀錄的開始時間留白會保留原值；結束時間留白代表進行中。新增紀錄必須填寫開始時間，系統會檢查時間不可重疊。</p>
+    <div class="grid two">
+      <label>修改人<input name="operator_name" maxlength="80" required></label>
+      <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
+    </div>
+    <label>修改原因<input name="reason" maxlength="200" required></label>
+    <input type="hidden" name="next" value="{{ edit_next }}">
+    <button class="button danger">確認儲存作業時間軸</button>
+  </form>
+  {% if order.status == 'completed' %}
+  <h3>包裝作業</h3>
+  <form method="post" action="{{ url_for('main.order_packing_correct', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定修正此訂單的包裝人員或包裝時間？');">
+    <div class="grid two">
+      <label>包裝狀態<select name="packing_status" required><option value="pending" {% if order.packing_status == 'pending' %}selected{% endif %}>未開始</option><option value="started" {% if order.packing_status == 'started' %}selected{% endif %}>包裝中</option><option value="completed" {% if order.packing_status == 'completed' %}selected{% endif %}>包裝完成</option></select></label>
+      <label>包裝人員<select name="packing_worker_id"><option value="">未指定</option>{% for worker in packing_correction_workers %}<option value="{{ worker.id }}" {% if worker.id == order.packing_worker_id %}selected{% endif %}>{{ worker.name }}（{{ worker.employee_no }}）{% if not worker.is_active %}［已停用］{% endif %}</option>{% endfor %}</select></label>
+      <label>包裝 START 時間<input type="datetime-local" name="packing_started_at" value="{{ datetime_local_value(order.packing_started_at) }}"></label>
+      <label>包裝 FINISH 時間（包裝中可留空）<input type="datetime-local" name="packing_finished_at" value="{{ datetime_local_value(order.packing_finished_at) }}"></label>
       <label>修改人<input name="operator_name" maxlength="80" required></label>
     </div>
     <label>修改原因<input name="reason" maxlength="200" required></label>
     <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
     <input type="hidden" name="next" value="{{ edit_next }}">
-    <button class="button danger">確認修正訂單資料</button>
+    <button class="button danger">確認修正包裝資料</button>
   </form>
+  {% endif %}
 </section>
-<section class="panel">
-  <h2>補登缺料／人工暫停</h2>
-  <form method="post" action="{{ url_for('main.order_pause_add', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定新增這段暫停紀錄？');">
-    <div class="grid two">
-      <label>暫停類型<select name="pause_type" required><option value="material">缺料／補料</option><option value="manual">人工暫停／恢復</option></select></label>
-      <label>暫停時間<input type="datetime-local" name="paused_at" required></label>
-      <label>恢復時間（進行中可留空）<input type="datetime-local" name="resumed_at"></label>
-      <label>修改人<input name="operator_name" maxlength="80" required></label>
-    </div>
-    <label>補登原因<input name="reason" maxlength="200" required></label>
-    <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
-    <input type="hidden" name="next" value="{{ edit_next }}">
-    <button class="button danger">確認補登暫停紀錄</button>
-  </form>
-</section>
-{% for pause_type, pause_label, pauses in [('material', '缺料／補料', material_pauses), ('manual', '人工暫停／恢復', manual_pauses)] %}
-  {% for pause in pauses %}
-  <section class="panel">
-    <h2>修正{{ pause_label }}紀錄 #{{ pause.id }}</h2>
-    <form method="post" action="{{ url_for('main.order_pause_correct', order_id=order.id, pause_type=pause_type, pause_id=pause.id) }}" class="form-wide" onsubmit="return confirm('確定修正這段暫停紀錄？');">
-      <div class="grid two">
-        <label>暫停時間<input type="datetime-local" name="paused_at" value="{{ datetime_local_value(pause.paused_at) }}" required></label>
-        <label>恢復時間（進行中可留空）<input type="datetime-local" name="resumed_at" value="{{ datetime_local_value(pause.resumed_at) }}"></label>
-        <label>修改人<input name="operator_name" maxlength="80" required></label>
-        <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
-      </div>
-      <label>修改原因<input name="reason" maxlength="200" required></label>
-      <input type="hidden" name="next" value="{{ edit_next }}">
-      <button class="button danger">確認修正暫停紀錄</button>
-    </form>
-  </section>
-  {% endfor %}
-{% endfor %}
 {% endif %}
 {% if corrections %}
 <section class="panel table-wrap">
   <h2>管理員修正紀錄</h2>
   <table><tr><th>修改時間</th><th>動作</th><th>修改人</th><th>原因</th><th>修改前備份</th></tr>
-    {% for correction in corrections %}<tr><td>{{ format_datetime(correction.created_at) }}</td><td>{{ {'manual_start':'補登 START','admin_correct_order':'訂單／人員／時間修正','admin_add_pause':'補登暫停','admin_correct_pause':'修正暫停'}.get(correction.action, correction.action) }}</td><td>{{ correction.operator_name }}</td><td>{{ correction.details_data.reason or '-' }}</td><td>{{ correction.details_data.backup or '-' }}</td></tr>{% endfor %}
+    {% for correction in corrections %}<tr><td>{{ format_datetime(correction.created_at) }}</td><td>{{ {'manual_start':'補登 START','auto_complete_inspection_for_packing':'因包裝掃描自動完成校機','admin_correct_order':'校機作業修正','admin_correct_operation_timeline':'校機時間軸修正','admin_correct_packing':'包裝作業修正','admin_add_pause':'補登暫停','admin_correct_pause':'修正暫停'}.get(correction.action, correction.action) }}</td><td>{{ correction.operator_name }}</td><td>{{ correction.details_data.reason or '-' }}</td><td>{{ correction.details_data.backup or '-' }}</td></tr>{% endfor %}
   </table>
 </section>
 {% endif %}

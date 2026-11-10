@@ -33,19 +33,23 @@ def _complete_inspection(worker_id, order_id):
     assert scan(_order_barcode(order_id, "FINISH"), worker_id)["result"] == "success"
 
 
-def test_packing_requires_completed_inspection_and_uses_same_worker(app):
+def test_packing_auto_completes_pending_inspection_and_uses_same_worker(app):
     inspection_worker_id, packing_worker_a, packing_worker_b, order_id = _setup(app)
     with app.app_context():
         start = _order_barcode(order_id, "START")
         finish = _order_barcode(order_id, "FINISH")
         assert packing_scan(_barcode("packing_worker", packing_worker_a))["result"] == "success"
-        blocked = packing_scan(start, packing_worker_a)
-        assert blocked["result"] == "invalid"
-        assert "校機尚未完成" in blocked["message"]
-
-        _complete_inspection(inspection_worker_id, order_id)
-        assert packing_scan(_barcode("packing_worker", packing_worker_a))["result"] == "success"
         assert packing_scan(start, packing_worker_a)["result"] == "success"
+        auto_completed = get_order(order_id)
+        expected = datetime.now(TAIPEI_TZ).date().isoformat() + " 00:00:00"
+        assert auto_completed["status"] == "completed"
+        assert format_datetime(auto_completed["started_at"]) == expected
+        assert format_datetime(auto_completed["finished_at"]) == expected
+        audit = get_db().execute(
+            "SELECT action FROM inspection_audit_log WHERE action='auto_complete_inspection_for_packing' AND entity_id=?",
+            (str(order_id),),
+        ).fetchone()
+        assert audit["action"] == "auto_complete_inspection_for_packing"
         assert packing_scan(_barcode("packing_worker", packing_worker_b))["result"] == "success"
         wrong_finish = packing_scan(finish, packing_worker_b)
         assert wrong_finish["result"] == "invalid"
