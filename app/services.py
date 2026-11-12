@@ -2991,6 +2991,10 @@ def query_report(filters):
         clauses.append("o.status='started' AND EXISTS(SELECT 1 FROM inspection_material_pause active_pause WHERE active_pause.order_id=o.id AND active_pause.resumed_at IS NULL)")
     elif status_group == "manual_paused":
         clauses.append("o.status='started' AND EXISTS(SELECT 1 FROM inspection_manual_pause active_pause WHERE active_pause.order_id=o.id AND active_pause.resumed_at IS NULL)")
+    elif status_group == "packing_started":
+        clauses.append("o.packing_status='started'")
+    elif status_group == "packing_completed":
+        clauses.append("o.packing_status='completed'")
     elif status_group == "started":
         clauses.append("o.status='started' AND NOT EXISTS(SELECT 1 FROM inspection_material_pause active_pause WHERE active_pause.order_id=o.id AND active_pause.resumed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM inspection_manual_pause active_pause WHERE active_pause.order_id=o.id AND active_pause.resumed_at IS NULL)")
     elif status_group in INSPECTION_STATUS_LABELS:
