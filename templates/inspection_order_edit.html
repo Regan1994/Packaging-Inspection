@@ -6,19 +6,16 @@
   <h2>訂單操作</h2>
   <div class="order-actions">
     <a class="button primary" href="{{ url_for('main.order_print', order_id=order.id) }}">列印 Code</a>
-    {% if order.status == 'pending' %}
+    {% if order.status != 'cancelled' %}
     <div class="order-action order-action-cancel">
-      <div><strong>業務取消訂單</strong><small>保留訂單紀錄與單號，之後不能用同單號建立新訂單。</small></div>
-      <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="return confirm('確定取消這筆訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
+      <div><strong>業務取消訂單</strong><small>保留訂單紀錄與單號，取消後不能用同單號建立新訂單。</small></div>
+      <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="const password=window.prompt('請輸入管理密碼'); if (!password) return false; this.querySelector('[name=password]').value=password; return confirm('確定取消這筆訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="password"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
     </div>
+    {% endif %}
+    {% if order.status == 'pending' %}
     <div class="order-action order-action-delete">
       <div><strong>訂單刪除</strong><small>刪除訂單資料與單號；刪除前會先備份，之後可用相同單號重新建立。</small></div>
       <form method="post" action="{{ url_for('main.order_delete', order_id=order.id) }}" onsubmit="return confirm('確定刪除這筆訂單？刪除後會移除訂單、條碼與紀錄，且釋放訂單號碼；刪除前會先備份。');"><input type="hidden" name="csrf_token" value="{{ delete_token }}"><input type="hidden" name="expected_order_no" value="{{ order.order_no }}"><input type="hidden" name="confirmation" value="刪除"><input type="hidden" name="next" value="{{ delete_next }}"><button class="button danger">訂單刪除</button></form>
-    </div>
-    {% elif order.status == 'started' %}
-    <div class="order-action order-action-cancel">
-      <div><strong>業務取消訂單</strong><small>保留訂單紀錄與單號；取消後仍可再選擇刪除以釋放單號。</small></div>
-      <form method="post" action="{{ url_for('main.order_cancel', order_id=order.id) }}" onsubmit="return confirm('確定取消這筆校機中的訂單？取消後會保留歷史紀錄與訂單號碼。');"><input type="hidden" name="next" value="{{ edit_next }}"><button class="button danger">訂單取消</button></form>
     </div>
     {% elif order.status == 'cancelled' %}
     <div class="order-action order-action-delete">
@@ -36,6 +33,24 @@
   </div>
 </section>
 {% if order.status != 'cancelled' %}
+<section class="panel">
+  <h2>訂單基本資料修正</h2>
+  <p class="muted">可修改目前訂單資料；訂單號碼與既有作業紀錄不可修改。每次儲存都會留下修改前後內容、原因、修改人與備份紀錄。</p>
+  <form method="post" action="{{ url_for('main.order_details_correct', order_id=order.id) }}" class="form-wide" onsubmit="return confirm('確定儲存這次訂單基本資料修正？');">
+    <div class="grid two">
+      <label>機型<select name="model_id" required>{% for model in order_models %}<option value="{{ model.id }}" {% if model.id == order.model_id %}selected{% endif %}{% if not model.is_active and model.id != order.model_id %} disabled{% endif %}>{{ model.model_name }}{% if not model.is_active %}［已停用］{% endif %}</option>{% endfor %}</select></label>
+      <label>機台製號<input name="machine_serial" value="{{ order.machine_serial }}" maxlength="80" required></label>
+      <label>客戶<input name="customer_name" value="{{ order.customer_name or '' }}" maxlength="120"></label>
+      <label>預計出貨日<input type="date" name="expected_ship_date" value="{{ order.expected_ship_date or '' }}"></label>
+      <label>重新檢驗原因<input name="reinspection_reason" value="{{ order.reinspection_reason or '' }}" maxlength="200"></label>
+      <label>修改人<input name="operator_name" maxlength="80" required></label>
+      <label>管理密碼<input type="password" name="password" autocomplete="current-password" required></label>
+    </div>
+    <label>修改原因<input name="reason" maxlength="200" required></label>
+    <input type="hidden" name="next" value="{{ edit_next }}">
+    <button class="button danger">確認儲存訂單資料</button>
+  </form>
+</section>
 <section class="panel">
   <h2>作業紀錄修正</h2>
   <p class="muted">僅用於誤掃或漏掃修正。校機、人工暫停、缺料／補料集中在同一個時間軸；欄位會先帶入目前資料，只需修改錯的時間。</p>
@@ -102,8 +117,8 @@
 {% if corrections %}
 <section class="panel table-wrap">
   <h2>管理員修正紀錄</h2>
-  <table><tr><th>修改時間</th><th>動作</th><th>修改人</th><th>原因</th><th>修改前備份</th></tr>
-    {% for correction in corrections %}<tr><td>{{ format_datetime(correction.created_at) }}</td><td>{{ {'manual_start':'補登 START','auto_complete_inspection_for_packing':'因包裝掃描自動完成校機','admin_correct_order':'校機作業修正','admin_correct_operation_timeline':'校機時間軸修正','admin_correct_packing':'包裝作業修正','admin_add_pause':'補登暫停','admin_correct_pause':'修正暫停'}.get(correction.action, correction.action) }}</td><td>{{ correction.operator_name }}</td><td>{{ correction.details_data.reason or '-' }}</td><td>{{ correction.details_data.backup or '-' }}</td></tr>{% endfor %}
+  <table class="correction-log"><tr><th>修改時間</th><th>動作</th><th>變更內容</th><th>修改人</th><th>原因</th></tr>
+    {% for correction in corrections %}<tr><td>{{ format_datetime(correction.created_at) }}</td><td>{{ {'manual_start':'補登 START','auto_complete_inspection_for_packing':'因包裝掃描自動完成校機','admin_correct_order_details':'訂單基本資料修正','admin_correct_order':'校機作業修正','admin_correct_operation_timeline':'校機時間軸修正','admin_correct_packing':'包裝作業修正','admin_add_pause':'補登暫停','admin_correct_pause':'修正暫停','cancel':'取消訂單'}.get(correction.action, correction.action) }}</td><td>{{ correction.changes_summary }}</td><td>{{ correction.operator_name }}</td><td>{{ correction.details_data.reason or '-' }}</td></tr>{% endfor %}
   </table>
 </section>
 {% endif %}

@@ -350,6 +350,7 @@ from .services import (
     cancel_order,
     change_access_password,
     clear_debug_data,
+    correct_order_details,
     correct_order_timeline,
     correct_operation_timeline,
     correct_packing_timeline,
@@ -393,7 +394,7 @@ bp = Blueprint("main", __name__)
 PROTECTED_ENDPOINTS = {
     "main.models", "main.model_update", "main.model_delete", "main.inspection_workers",
     "main.inspection_worker_status", "main.inspection_worker_update", "main.inspection_worker_delete", "main.worker_print", "main.orders_new", "main.orders",
-    "main.order_edit", "main.order_print", "main.order_admin_correct", "main.order_operation_timeline_correct", "main.order_packing_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.order_packing_complete", "main.reports", "main.reports_export",
+    "main.order_edit", "main.order_print", "main.order_details_correct", "main.order_admin_correct", "main.order_operation_timeline_correct", "main.order_packing_correct", "main.order_pause_correct", "main.order_pause_add", "main.order_cancel", "main.order_delete", "main.order_packing_complete", "main.reports", "main.reports_export",
     "main.settings", "main.change_password", "main.password_mode", "main.debug_clear",
     "main.backup", "main.restore", "main.material_barcodes_print",
     "main.pause_barcodes_print",
@@ -647,12 +648,35 @@ def order_edit(order_id):
         pause_intervals=material_pauses + manual_pauses,
         correction_workers=list_inspection_workers(),
         packing_correction_workers=list_packing_workers(),
+        order_models=list_models(),
         corrections=list_order_corrections(order_id),
         datetime_local_value=datetime_local_value,
         delete_token=token,
         delete_next=url_for("main.reports"),
         edit_next=url_for("main.order_edit", order_id=order_id),
     )
+
+
+@bp.post("/orders/<int:order_id>/details-correct")
+def order_details_correct(order_id):
+    next_path = safe_next_path(request.form.get("next"))
+    try:
+        backup = correct_order_details(
+            order_id,
+            request.form.get("model_id"),
+            request.form.get("machine_serial"),
+            request.form.get("customer_name"),
+            request.form.get("expected_ship_date"),
+            request.form.get("reinspection_reason"),
+            request.form.get("reason"),
+            request.form.get("operator_name"),
+            request.form.get("password"),
+            current_app.config["BACKUP_DIRECTORY"],
+        )
+        flash(f"訂單基本資料已修正；修改前備份：{backup.name}", "success")
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        flash(f"沒有修正訂單基本資料：{exc}", "error")
+    return redirect(next_path)
 
 
 @bp.post("/orders/<int:order_id>/admin-correct")
@@ -796,7 +820,10 @@ def pause_barcodes_print():
 @bp.post("/orders/<int:order_id>/cancel")
 def order_cancel(order_id):
     try:
-        cancel_order(order_id)
+        cancel_order(
+            order_id,
+            request.form.get("password"),
+        )
         flash("訂單已取消，歷史資料保留", "success")
     except ValueError as exc:
         flash(str(exc), "error")

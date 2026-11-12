@@ -1493,6 +1493,115 @@ def update_expected_ship_date(order_id, expected_ship_date, reason, operator_nam
     return backup
 
 
+def correct_order_details(
+    order_id,
+    model_id,
+    machine_serial,
+    customer_name,
+    expected_ship_date,
+    reinspection_reason,
+    reason,
+    operator_name,
+    password,
+    backup_dir,
+):
+    """Correct current order data while retaining an auditable before/after record."""
+    reason, operator_name = _require_admin_correction(password, reason, operator_name)
+    machine_serial = _inspection_code(machine_serial, "機台製號")
+    customer_name = _inspection_text(customer_name, "客戶名稱", required=False)
+    reinspection_reason = _inspection_text(reinspection_reason, "重新檢驗原因", required=False)
+    raw_date = (expected_ship_date or "").strip()
+    expected_ship_date = raw_date or None
+    if expected_ship_date:
+        try:
+            datetime.strptime(expected_ship_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("預計出貨日期格式不正確") from exc
+    try:
+        model_id = int(model_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("請選擇機型") from exc
+
+    db = get_db()
+    order = get_order(order_id)
+    if not order:
+        raise ValueError("找不到訂單")
+    if order["status"] == "cancelled":
+        raise ValueError("已取消訂單不能修改基本資料")
+    model = db.execute(
+        "SELECT * FROM inspection_model_master WHERE id=? AND is_active=1", (model_id,)
+    ).fetchone()
+    if not model:
+        raise ValueError("機型不存在或已停用")
+
+    fields = (
+        "model_id",
+        "model_name_snapshot",
+        "model_code_snapshot",
+        "axis_type_snapshot",
+        "machine_serial",
+        "customer_name",
+        "expected_ship_date",
+        "reinspection_reason",
+    )
+    old_values = {field: order[field] for field in fields}
+    new_values = {
+        "model_id": model["id"],
+        "model_name_snapshot": model["model_name"],
+        "model_code_snapshot": model["model_code"],
+        "axis_type_snapshot": _infer_inspection_axis_type(model["model_name"], machine_serial),
+        "machine_serial": machine_serial,
+        "customer_name": customer_name,
+        "expected_ship_date": expected_ship_date,
+        "reinspection_reason": reinspection_reason,
+    }
+    if old_values == new_values:
+        raise ValueError("訂單基本資料沒有變更")
+
+    backup = backup_database(backup_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute(
+            "SELECT model_id,model_name_snapshot,model_code_snapshot,axis_type_snapshot,machine_serial,customer_name,expected_ship_date,reinspection_reason,status FROM inspection_order WHERE id=?",
+            (order_id,),
+        ).fetchone()
+        if not current or current["status"] == "cancelled":
+            raise ValueError("訂單已取消或不存在，請重新開啟後再修改")
+        if {field: current[field] for field in fields} != old_values:
+            raise ValueError("訂單資料已被其他操作更新，請重新開啟後再修改")
+        db.execute(
+            """
+            UPDATE inspection_order
+            SET model_id=?,model_name_snapshot=?,model_code_snapshot=?,axis_type_snapshot=?,
+                machine_serial=?,customer_name=?,expected_ship_date=?,reinspection_reason=?,updated_at=?
+            WHERE id=?
+            """,
+            (
+                new_values["model_id"], new_values["model_name_snapshot"], new_values["model_code_snapshot"],
+                new_values["axis_type_snapshot"], new_values["machine_serial"], new_values["customer_name"],
+                new_values["expected_ship_date"], new_values["reinspection_reason"], utc_now(), order_id,
+            ),
+        )
+        _inspection_audit(
+            "admin_correct_order_details",
+            "inspection_order",
+            order_id,
+            {
+                "order_no": order["order_no"],
+                "old": old_values,
+                "new": new_values,
+                "reason": reason,
+                "backup": str(backup),
+            },
+            operator_name,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return backup
+
+
 def get_order(order_id):
     return get_db().execute(
         """
@@ -2166,13 +2275,14 @@ def manually_complete_packing(order_id, backup_dir, operator_name="admin"):
     return backup
 
 
-def cancel_order(order_id, cancelled_by="admin"):
+def cancel_order(order_id, password):
+    if not verify_access_password(password):
+        raise ValueError("管理密碼錯誤")
+    cancelled_by = "管理員"
     db = get_db()
     order = get_order(order_id)
     if not order:
         raise ValueError("找不到訂單")
-    if order["status"] == "completed":
-        raise ValueError("已完成訂單不能取消")
     if order["status"] == "cancelled":
         raise ValueError("訂單已取消")
     now = utc_now()
@@ -2193,7 +2303,17 @@ def cancel_order(order_id, cancelled_by="admin"):
         (now, f"{cancelled_by}（取消訂單）", order_id),
     )
     db.execute("UPDATE inspection_order SET status='cancelled',cancelled_at=?,cancelled_by=?,updated_at=? WHERE id=?", (now, cancelled_by, now, order_id))
-    _inspection_audit("cancel", "inspection_order", order_id, {"order_no": order["order_no"]}, cancelled_by)
+    _inspection_audit(
+        "cancel",
+        "inspection_order",
+        order_id,
+        {
+            "order_no": order["order_no"],
+            "old": {"status": order["status"], "packing_status": order["packing_status"]},
+            "new": {"status": "cancelled", "packing_status": order["packing_status"]},
+        },
+        cancelled_by,
+    )
     db.commit()
 
 
@@ -2902,7 +3022,7 @@ def list_order_corrections(order_id):
     rows = get_db().execute(
         """
         SELECT * FROM inspection_audit_log
-        WHERE (action LIKE 'admin_%' OR action IN ('manual_start','auto_complete_inspection_for_packing'))
+        WHERE (action LIKE 'admin_%' OR action IN ('manual_start','auto_complete_inspection_for_packing','cancel'))
           AND entity_type='inspection_order' AND entity_id=?
         ORDER BY created_at DESC
         """,
@@ -2915,8 +3035,58 @@ def list_order_corrections(order_id):
             item["details_data"] = json.loads(row["details"] or "{}")
         except (TypeError, ValueError):
             item["details_data"] = {}
+        item["changes_summary"] = _order_correction_changes_summary(item["details_data"])
         result.append(item)
     return result
+
+
+def _order_correction_changes_summary(details):
+    old_values = details.get("old")
+    new_values = details.get("new")
+    if not isinstance(old_values, dict) or not isinstance(new_values, dict):
+        return "-"
+
+    labels = {
+        "model_name_snapshot": "機型",
+        "axis_type_snapshot": "軸別",
+        "machine_serial": "機台製號",
+        "customer_name": "客戶",
+        "expected_ship_date": "預計出貨日",
+        "reinspection_reason": "重新檢驗原因",
+        "worker_name": "校機人員",
+        "started_at": "校機開始時間",
+        "finished_at": "校機結束時間",
+        "status": "訂單狀態",
+        "packing_worker_name": "包裝人員",
+        "packing_started_at": "包裝開始時間",
+        "packing_finished_at": "包裝結束時間",
+        "packing_status": "包裝狀態",
+    }
+    ignored = {"model_id", "model_code_snapshot", "worker_id", "employee_no", "packing_worker_id", "packing_worker_no"}
+
+    def display(key, value):
+        if value in (None, ""):
+            return "（空白）"
+        if key == "status":
+            return status_label(value)
+        if key == "packing_status":
+            return packing_status_label(value)
+        if key == "axis_type_snapshot":
+            return axis_type_label(value)
+        if key.endswith("_at"):
+            return format_datetime(value)
+        return str(value)
+
+    changes = []
+    for key, label in labels.items():
+        if key in old_values and key in new_values and old_values[key] != new_values[key]:
+            changes.append(f"{label}：{display(key, old_values[key])} → {display(key, new_values[key])}")
+    if not changes:
+        for key in set(old_values) | set(new_values):
+            if key in ignored or old_values.get(key) == new_values.get(key):
+                continue
+            changes.append(f"{key}：{display(key, old_values.get(key))} → {display(key, new_values.get(key))}")
+    return "；".join(changes) if changes else "-"
 
 
 def delete_order(order_id, expected_order_no, confirmation, backup_dir, operator_name="admin"):

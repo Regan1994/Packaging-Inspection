@@ -95,7 +95,89 @@ def test_order_edit_groups_only_operation_corrections(client, app):
     assert "修改需求日期" not in page
     assert "補登開始時間" not in page
     assert "作業紀錄修正" in page
-    assert "校機作業" in page
+    assert "校機與暫停時間" in page
+
+
+def test_admin_can_correct_order_details_and_audit_before_after_values(client, app):
+    _, _, order_id = setup_order(app)
+    with app.app_context():
+        replacement_model_id = create_model("FHR-255", "FHR255")
+
+    response = client.post(
+        f"/orders/{order_id}/details-correct",
+        data={
+            "model_id": str(replacement_model_id),
+            "machine_serial": "S27-02",
+            "customer_name": "新客戶",
+            "expected_ship_date": "2026-11-30",
+            "reinspection_reason": "更換機台後複驗",
+            "reason": "原機台故障，改用備用機台",
+            "operator_name": "主管甲",
+            "password": "TJR",
+            "next": f"/orders/{order_id}/edit",
+        },
+    )
+    assert response.status_code == 302
+
+    with app.app_context():
+        order = get_order(order_id)
+        assert order["model_id"] == replacement_model_id
+        assert order["machine_serial"] == "S27-02"
+        assert order["customer_name"] == "新客戶"
+        assert order["expected_ship_date"] == "2026-11-30"
+        assert order["reinspection_reason"] == "更換機台後複驗"
+        assert order["axis_type_snapshot"] == "5"
+        audit = get_db().execute(
+            "SELECT * FROM inspection_audit_log WHERE action='admin_correct_order_details' AND entity_id=?",
+            (str(order_id),),
+        ).fetchone()
+        details = json.loads(audit["details"])
+        assert details["old"]["machine_serial"] == "E27-01"
+        assert details["new"]["machine_serial"] == "S27-02"
+        assert details["reason"] == "原機台故障，改用備用機台"
+
+    page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
+    assert "機台製號：E27-01 → S27-02" in page
+    assert "客戶：（空白） → 新客戶" in page
+
+
+def test_completed_and_packed_order_can_be_cancelled_without_erasing_packing_history(client, app):
+    worker_a, _, order_id = setup_order(app)
+    client.post(
+        f"/orders/{order_id}/admin-correct",
+        data=correction_data(worker_a, finished_at="2026-10-29T10:00"),
+    )
+    with app.app_context():
+        get_db().execute(
+            "UPDATE inspection_order SET packing_status='completed',packing_started_at=?,packing_finished_at=? WHERE id=?",
+            ("2026-10-29T02:10:00+00:00", "2026-10-29T02:30:00+00:00", order_id),
+        )
+        get_db().commit()
+
+    page = client.get(f"/orders/{order_id}/edit").get_data(as_text=True)
+    assert "訂單取消" in page
+    response = client.post(
+        f"/orders/{order_id}/cancel",
+        data={
+            "password": "TJR",
+            "next": f"/orders/{order_id}/edit",
+        },
+    )
+    assert response.status_code == 302
+
+    with app.app_context():
+        order = get_order(order_id)
+        assert order["status"] == "cancelled"
+        assert order["packing_status"] == "completed"
+        assert order["packing_started_at"] == "2026-10-29T02:10:00+00:00"
+        audit = get_db().execute(
+            "SELECT * FROM inspection_audit_log WHERE action='cancel' AND entity_id=?",
+            (str(order_id),),
+        ).fetchone()
+        details = json.loads(audit["details"])
+        assert details["old"] == {"status": "completed", "packing_status": "completed"}
+        assert details["new"] == {"status": "cancelled", "packing_status": "completed"}
+        assert audit["operator_name"] == "管理員"
 
 
 def test_admin_can_correct_packing_worker_and_timeline(client, app):

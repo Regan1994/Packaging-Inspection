@@ -378,15 +378,18 @@ def test_report_detail_opens_order_actions_and_cancel_is_available(client, app):
     assert "結束日期時間：" in edit
     assert ">查看明細</a>" in page
 
-    response = client.post(f"/orders/{order_a}/cancel", data={"next": f"/orders/{order_a}/edit"})
+    response = client.post(
+        f"/orders/{order_a}/cancel",
+        data={"next": f"/orders/{order_a}/edit", "password": "TJR"},
+    )
     assert response.status_code == 302
     assert response.location.endswith(f"/orders/{order_a}/edit")
     with app.app_context():
         assert get_order(order_a)["status"] == "cancelled"
 
     cancelled_edit = client.get(f"/orders/{order_a}/edit").get_data(as_text=True)
-    assert "此訂單已取消" in cancelled_edit
-    assert "之後可用相同單號重新建立" in cancelled_edit
+    assert "訂單刪除" in cancelled_edit
+    assert f"/orders/{order_a}/cancel" not in cancelled_edit
     with client.session_transaction() as session:
         token = session["order_delete_token"]
     response = client.post(f"/orders/{order_a}/delete", data={
@@ -673,7 +676,10 @@ def test_material_barcodes_print_and_replenish_requires_open_pause(client, app):
         client.post("/api/scan", json={"payload": worker_barcode(worker_a)})
         client.post("/api/scan", json={"payload": material_barcode("SHORTAGE")})
         assert client.post("/api/scan", json={"payload": payload_for(order_a, "START")}).json["result"] == "success"
-        assert client.post(f"/orders/{order_a}/cancel", data={"next": "/reports"}).status_code == 302
+        assert client.post(
+            f"/orders/{order_a}/cancel",
+            data={"next": "/reports", "password": "TJR"},
+        ).status_code == 302
         pause = get_db().execute("SELECT * FROM inspection_material_pause WHERE order_id=?", (order_a,)).fetchone()
         assert pause["resumed_at"] is not None
         assert get_order(order_a)["material_paused"] == 0
